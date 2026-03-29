@@ -1,0 +1,13 @@
+[project]
+name = "continual-go"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "flax>=0.12.6",
+    "jax>=0.9.2",
+    "jaxtyping>=0.3.9",
+    "matplotlib>=3.10.8",
+    "numpy>=2.4.3",
+]
