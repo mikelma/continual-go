@@ -42,10 +42,13 @@ def _adjacent4(mask: jax.Array) -> jax.Array:
     from_right = jnp.pad(mask[:, 1:], ((0, 0), (0, 1)))
     return from_up | from_down | from_left | from_right
 
-class ContinualGo():
+
+class ContinualGo:
     def init(self, size: IntLike = 9) -> State:
         board = jnp.zeros((size, size), dtype=int)
-        return State(num_actions=(size * size) - 1, size=size, board=board, turn=-1, k=16)
+        return State(
+            num_actions=(size * size) - 1, size=size, board=board, turn=-1, k=16
+        )
 
     def step(self, state: State, action: IntLike) -> tuple[State, ScalarLike]:
         n = state.size
@@ -61,13 +64,17 @@ class ContinualGo():
 
         # set the new stone according to action
         i = action // n
-        j = action - n*i
+        j = action - n * i
         new_board = new_board.at[i, j].set(state.turn)
 
         # count the liberties of each stone
         # TODO optimize: only count opponent's liberties, not whole board
-        coords = jnp.stack(jnp.indices((state.size, state.size)), axis=-1).reshape(-1, 2)
-        liberties = jax.vmap(self.count_liberties, in_axes=(None, 0, 0))(board, coords[:, 0], coords[:, 1])
+        coords = jnp.stack(jnp.indices((state.size, state.size)), axis=-1).reshape(
+            -1, 2
+        )
+        liberties = jax.vmap(self.count_liberties, in_axes=(None, 0, 0))(
+            board, coords[:, 0], coords[:, 1]
+        )
         liberties = liberties.reshape((n, n))
 
         # check captured stones (& update board): opponent's stones with 0 liberties
@@ -81,7 +88,9 @@ class ContinualGo():
             turn=state.turn * -1,
         ), reward
 
-    def count_liberties(self, board: Integer[Array, "size size"], i: IntLike, j: IntLike) -> IntLike:
+    def count_liberties(
+        self, board: Integer[Array, "size size"], i: IntLike, j: IntLike
+    ) -> IntLike:
         stone = board[i, j]
 
         def on_empty(_):
@@ -110,7 +119,6 @@ class ContinualGo():
             return liberties_mask.sum(dtype=jnp.int32)
 
         return jax.lax.cond(stone == 0, on_empty, on_stone, operand=None)
-
 
         # # board = jax.lax.cond()
         # def _count(i, j, checked):

@@ -4,6 +4,7 @@ from src.continual_go import ContinualGo, plot_board
 from pprint import pprint
 import matplotlib.pyplot as plt
 
+
 def act_randomly(key, mask):
     """Ignore observation and choose randomly from legal actions"""
     mask = mask.reshape(-1)
@@ -37,6 +38,6 @@ def main():
 
     plt.show()
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":
     main()
