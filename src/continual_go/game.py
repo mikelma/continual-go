@@ -73,13 +73,13 @@ class ContinualGo:
             -1, 2
         )
         liberties = jax.vmap(self.count_liberties, in_axes=(None, 0, 0))(
-            board, coords[:, 0], coords[:, 1]
+            new_board, coords[:, 0], coords[:, 1]
         )
         liberties = liberties.reshape((n, n))
 
         # check captured stones (& update board): opponent's stones with 0 liberties
-        captured = (jnp.sign(board) == (-1 * state.turn)) & (liberties == 0)
-        board = jnp.where(captured, jnp.zeros_like(board, dtype=int), board)
+        captured = (jnp.sign(new_board) == (-1 * state.turn)) & (liberties == 0)
+        new_board = jnp.where(captured, jnp.zeros_like(board, dtype=int), new_board)
 
         reward = captured.sum()
 
@@ -182,10 +182,6 @@ class ContinualGo:
 
 
 def plot_board(board, ax=None, show=True):
-    board = np.asarray(board)
-    if not (board.ndim == 2 and board.shape[0] == board.shape[1]):
-        raise ValueError("board must be a square 2D matrix")
-
     n = board.shape[0]
 
     if ax is None:
@@ -248,8 +244,12 @@ def plot_board(board, ax=None, show=True):
     ax.set_xlim(-margin, n - 1 + margin)
     ax.set_ylim(-margin, n - 1 + margin)
     ax.set_aspect("equal")
-    ax.set_xticks([])
-    ax.set_yticks([])
+
+    ax.set_xticks(np.arange(n))
+    ax.set_xticklabels(np.arange(n))
+
+    ax.set_yticks(np.arange(n))
+    ax.set_yticklabels(np.arange(n)[::-1])
 
     for spine in ax.spines.values():
         spine.set_visible(False)
