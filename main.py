@@ -13,14 +13,19 @@ def act_randomly(key, mask):
     return jax.random.categorical(key, logits=logits, axis=-1)
 
 
-def human_action(state):
-    s = input("Enter coordinates (i<space>j): ")
+def human_action(state, legal_mask):
+    player = "black" if state.turn == -1 else "white"
+    s = input(f"[{player}] Enter coordinates (i j): ")
     try:
         i = int(s.split(" ")[0])
         j = int(s.split(" ")[1])
     except Exception as _e:
         print("\n*** Parsing error! Try again ***\n")
-        return human_action(state)
+        return human_action(state, legal_mask)
+
+    if not legal_mask[i][j]:
+        print("\n*** Illegal move! Try again ***\n")
+        return human_action(state, legal_mask)
 
     return i * state.size + j
 
@@ -31,16 +36,17 @@ def main():
     env = ContinualGo()
     state = env.init()
 
-
-    for i in range(100):
+    for i in range(1_000_000):
         key, _key = jax.random.split(key)
 
-        print(f">>> step={i}")
+        n_black, n_white = (state.board < 0).sum(), (state.board > 0).sum()
+        print(f">>> step={i}, black={n_black}, white={n_white}")
+
         plt.cla()
         plot_board(state.board, ax=plt.gca(), show=False)
         plt.pause(0.1)
 
-        action = human_action(state)
+        action = human_action(state, env.legal_actions(state))
         # action = act_randomly(_key, env.legal_actions(state))
 
         state, reward = env.step(state, action)

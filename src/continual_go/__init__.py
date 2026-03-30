@@ -1,1 +1,2 @@
-from .game import ContinualGo, plot_board
+from .game import ContinualGo
+from .render import plot_board
