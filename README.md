@@ -2,6 +2,9 @@
 
 ContinualGO is an environment designed to challenge reinforcement learning algorithms in Big Worlds, see [Javed & Sutton (2024)](https://openreview.net/pdf?id=Sv7DazuCn8).
 
+
++ **Try it yourself ✨:** Install the `continual_go` Python package (next section) and run [`play_human.py`](./play_human.py)!
+
 ## Getting started
 
 Using [`uv`](https://docs.astral.sh/uv/) you can install the latest version (main branch) of ContinualGo by running the following command inside an `uv` project:
