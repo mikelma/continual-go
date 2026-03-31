@@ -1,7 +1,6 @@
 import jax
 import jax.numpy as jnp
 from src.continual_go import ContinualGo, plot_board
-from pprint import pprint
 import matplotlib.pyplot as plt
 
 
@@ -14,6 +13,7 @@ def act_randomly(key, mask):
 
 
 def human_action(state, legal_mask):
+    size = state.board.shape[0]
     player = "black" if state.turn == -1 else "white"
     s = input(f"[{player}] Enter coordinates (i j): ")
     try:
@@ -27,13 +27,26 @@ def human_action(state, legal_mask):
         print("\n*** Illegal move! Try again ***\n")
         return human_action(state, legal_mask)
 
-    return i * state.size + j
+    return i * size + j
 
+def rollout(key, env, num_timesteps):
+    def _step(carry, _):
+        key, state = carry
+        key, _key = jax.random.split(key)
+
+        action = act_randomly(_key, env.legal_actions(state))
+        state, reward = env.step(state, action)
+
+        return (key, state), reward
+
+    state = env.init()
+    _carry, res = jax.lax.scan(_step, (key, state), length=num_timesteps)
+    return res
 
 def main():
     key = jax.random.key(42)
 
-    env = ContinualGo()
+    env = ContinualGo(size=9, k=32)
     state = env.init()
 
     for i in range(1_000_000):
@@ -46,10 +59,10 @@ def main():
         plot_board(state.board, ax=plt.gca(), show=False)
         plt.pause(0.1)
 
-        action = human_action(state, env.legal_actions(state))
-        # action = act_randomly(_key, env.legal_actions(state))
+        # action = human_action(state, env.legal_actions(state))
+        action = jax.jit(act_randomly)(_key, env.legal_actions(state))
 
-        state, reward = env.step(state, action)
+        state, reward = jax.jit(env.step)(state, action)
 
         if reward > 0:
             print(">> Capture!")

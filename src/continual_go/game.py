@@ -11,11 +11,8 @@ IntLike: TypeAlias = Integer[ScalarLike, ""]
 
 @struct.dataclass
 class State:
-    num_actions: IntLike
-    size: IntLike
     board: Integer[Array, "size size"]
     turn: IntLike  # -1 (black) or +1 (white)
-    k: IntLike  # max number of stones per player
     prev_boards: Integer[Array, "2 size size"]  # [board_{t-2}, board_{t-1}]
 
 
@@ -28,16 +25,23 @@ def _adjacent4(mask: jax.Array) -> jax.Array:
     return from_up | from_down | from_left | from_right
 
 
-class ContinualGo:
-    def init(self, size: IntLike = 9) -> State:
-        board = jnp.zeros((size, size), dtype=int)
-        prev_boards = jnp.zeros((2, size, size), dtype=int)
+class ContinualGo(PyTreeNode):
+    size: int = struct.field(pytree_node=False)
+    k: int = struct.field(pytree_node=False)  # max number of stones per player
+
+    @property
+    def num_actions(self) -> IntLike:
+        return (self.size * self.size ) - 1
+
+    def init(self) -> State:
+        board = jnp.zeros((self.size, self.size), dtype=int)
+        prev_boards = jnp.zeros((2, self.size, self.size), dtype=int)
         return State(
-            num_actions=(size * size) - 1, size=size, board=board, turn=-1, k=16, prev_boards=prev_boards
+            board=board, turn=-1, prev_boards=prev_boards
         )
 
     def step(self, state: State, action: IntLike) -> tuple[State, ScalarLike]:
-        n = state.size
+        n = self.size
         action = jnp.minimum(jnp.array((n * n - 1)), action)  # no pass allowed
 
         # update board history
@@ -59,7 +63,7 @@ class ContinualGo:
 
         # count the liberties of each stone
         # TODO optimize: only count opponent's liberties, not whole board
-        coords = jnp.stack(jnp.indices((state.size, state.size)), axis=-1).reshape(
+        coords = jnp.stack(jnp.indices((self.size, self.size)), axis=-1).reshape(
             -1, 2
         )
         liberties = jax.vmap(self.count_liberties, in_axes=(None, 0, 0))(
@@ -84,7 +88,7 @@ class ContinualGo:
         # check if the opponent has more than K-1 stones, and remove the oldest in that case
         opponent = -1 * state.turn
         new_board = jax.lax.cond(
-            (jnp.sign(new_board) == opponent).sum() > (state.k - 1),
+            (jnp.sign(new_board) == opponent).sum() > (self.k - 1),
             lambda: remove_stone(opponent),
             lambda: new_board,
         )
@@ -129,11 +133,11 @@ class ContinualGo:
 
     def legal_actions(self, state: State) -> Bool[Array, "size size"]:
         board = state.board
-        n = state.size
+        n = self.size
 
         def _played_check(ij):
             i, j = ij[0], ij[1]
-            action = i * state.size + j
+            action = i * self.size + j
             new_state, _rwd = self.step(state, action)
 
             # liberties of the newly played stone
