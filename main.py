@@ -30,11 +30,16 @@ def human_action(state, legal_mask):
     return i * size + j
 
 def rollout(key, env, num_timesteps):
+    unif_dist = jnp.full((env.num_actions,), 1 / env.num_actions)
+
     def _step(carry, _):
         key, state = carry
         key, _key = jax.random.split(key)
 
-        action = act_randomly(_key, env.legal_actions(state))
+        # action = act_randomly(_key, env.legal_actions(state))  # legal mov. check
+        # action = act_randomly(_key, jnp.zeros((env.num_actions,)))  # no legal mov. check
+        action = env.sample_legal_action(key, state, unif_dist)
+
         state, reward = env.step(state, action)
 
         return (key, state), reward
@@ -46,8 +51,22 @@ def rollout(key, env, num_timesteps):
 def main():
     key = jax.random.key(42)
 
-    env = ContinualGo(size=9, k=32)
+    env = ContinualGo(size=9, k=22)
+
+    #############################
+    # import time
+    # jit_fn = jax.jit(rollout, static_argnums=(2))
+    # start = time.time()
+    # jit_fn(key, env, 1000).block_until_ready()
+    # print("end 1:", time.time() - start)
+    # start = time.time()
+    # jit_fn(key, env, 1000).block_until_ready()
+    # print("end 2:", time.time() - start)
+    # quit()
+    #############################
+
     state = env.init()
+
 
     for i in range(1_000_000):
         key, _key = jax.random.split(key)
@@ -60,7 +79,9 @@ def main():
         plt.pause(0.1)
 
         # action = human_action(state, env.legal_actions(state))
-        action = jax.jit(act_randomly)(_key, env.legal_actions(state))
+        # action = jax.jit(act_randomly)(_key, env.legal_actions(state))
+        dist = jnp.full((env.num_actions,), 1 / env.num_actions)
+        action = env.sample_legal_action(key, state, dist)
 
         state, reward = jax.jit(env.step)(state, action)
 

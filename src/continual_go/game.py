@@ -31,7 +31,7 @@ class ContinualGo(PyTreeNode):
 
     @property
     def num_actions(self) -> IntLike:
-        return (self.size * self.size ) - 1
+        return self.size * self.size
 
     def init(self) -> State:
         board = jnp.zeros((self.size, self.size), dtype=int)
@@ -130,6 +130,56 @@ class ContinualGo(PyTreeNode):
             return liberties_mask.sum(dtype=jnp.int32)
 
         return jax.lax.cond(stone == 0, on_empty, on_stone, operand=None)
+
+    def sample_legal_action(
+            self,
+            key: PRNGKeyArray,
+            state: State,
+            weights: Float[Scalar, " {self.size**2}"],
+            eps: ScalarLike = 1e-5
+    ) -> IntLike:
+        weights += eps
+
+        def normalize_and_sample(key, weights, mask):
+            # weights = weights.at[mask].set(0.)
+            weights = jnp.where(mask, jnp.zeros_like(weights), weights)
+            probs = weights / weights.sum()
+            logits = jnp.maximum(jnp.log(probs), jnp.finfo(probs.dtype).min)
+            return jax.random.categorical(key, logits=logits, axis=-1)
+
+
+        def cond(carry):
+            _, action, mask = carry
+            i = action // self.size
+            j = action - self.size * i
+            # simulate playing this action
+            new_state, _rwd = self.step(state, action)
+            # liberties of the newly played stone
+            played_libs = self.count_liberties(new_state.board, i, j)
+            suicide = played_libs == 0
+            # check if new state is repeats board history
+            repeats_board = (jnp.sign(state.prev_boards[1]) == jnp.sign(new_state.board)).all()
+            return repeats_board | suicide  # True if action is illegal
+
+        def try_again(carry):
+            key, failed_action, mask = carry
+            mask = mask.at[failed_action].set(False)
+            key, _key = jax.random.split(key)
+            action = normalize_and_sample(_key, weights, mask)
+            return (key, action, mask)
+
+
+        key_init, key_loop = jax.random.split(key)
+        # set illegal moves (now, occupied positions) to True
+        init_mask = (state.board != 0).reshape(-1)
+        # sample first action candidate
+        action = normalize_and_sample(key_init, weights, init_mask)
+
+        init_carry = (key_loop, action, init_mask)
+        carry = jax.lax.while_loop(cond, try_again, init_carry)
+        _, action, _ = carry
+        return action
+
 
     def legal_actions(self, state: State) -> Bool[Array, "size size"]:
         board = state.board
