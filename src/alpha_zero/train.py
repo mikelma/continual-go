@@ -1,4 +1,16 @@
-# modifed from https://github.com/sotetsuk/pgx/blob/main/examples/alphazero/train.py
+# Copyright 2023 The Pgx Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 import datetime
 import os
@@ -12,21 +24,22 @@ import jax
 import jax.numpy as jnp
 import mctx
 import optax
-import pgx
 import wandb
-from omegaconf import OmegaConf
-from pgx.experimental import auto_reset
 from pydantic import BaseModel
+import tyro
 
-from network import AZNet
+from src.network import AZNet
+from src.continual_go import ContinualGo, State
 
 devices = jax.local_devices()
 num_devices = len(devices)
 
 
 class Config(BaseModel):
-    env_id: pgx.EnvId = "go_9x9"
-    seed: int = 0
+    board_size: int = 9
+    max_stones: int = 32
+
+    seed: int = 42
     max_num_iters: int = 400
     # network params
     num_channels: int = 128
@@ -42,17 +55,9 @@ class Config(BaseModel):
     # eval params
     eval_interval: int = 5
 
-    class Config:
-        extra = "forbid"
 
-
-conf_dict = OmegaConf.from_cli()
-config: Config = Config(**conf_dict)
-print(config)
-
-env = pgx.make(config.env_id)
-baseline = pgx.make_baseline_model(config.env_id + "_v0")
-
+config = tyro.cli(Config)
+env = ContinualGo(size=config.board_size, k=config.max_stones)
 
 def forward_fn(x, is_eval=False):
     net = AZNet(
@@ -69,24 +74,31 @@ forward = hk.without_apply_rng(hk.transform_with_state(forward_fn))
 optimizer = optax.adam(learning_rate=config.learning_rate)
 
 
-def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: pgx.State):
+def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State):
     # model: params
     # state: embedding
     del rng_key
     model_params, model_state = model
 
     current_player = state.current_player
-    state = jax.vmap(env.step)(state, action)
+    state, reward = jax.vmap(env.step)(state, action)
 
-    (logits, value), _ = forward.apply(model_params, model_state, state.observation, is_eval=True)
+    # TODO verify
+    obs = state.turn * state.board / env.k
+
+    (logits, value), _ = forward.apply(model_params, model_state, obs, is_eval=True)
+
+    # TODO implement this
     # mask invalid actions
-    logits = logits - jnp.max(logits, axis=-1, keepdims=True)
-    logits = jnp.where(state.legal_action_mask, logits, jnp.finfo(logits.dtype).min)
+    # logits = logits - jnp.max(logits, axis=-1, keepdims=True)
+    # logits = jnp.where(state.legal_action_mask, logits, jnp.finfo(logits.dtype).min)
 
-    reward = state.rewards[jnp.arange(state.rewards.shape[0]), current_player]
-    value = jnp.where(state.terminated, 0.0, value)
+    # TODO simplify this
+    terminated = False
+    # reward = state.rewards[jnp.arange(state.rewards.shape[0]), current_player]
+    value = jnp.where(terminated, 0.0, value)
     discount = -1.0 * jnp.ones_like(value)
-    discount = jnp.where(state.terminated, 0.0, discount)
+    discount = jnp.where(terminated, 0.0, discount)
 
     recurrent_fn_output = mctx.RecurrentFnOutput(
         reward=reward,
@@ -112,7 +124,9 @@ def selfplay(model, rng_key: jnp.ndarray) -> SelfplayOutput:
 
     def step_fn(state, key) -> SelfplayOutput:
         key1, key2 = jax.random.split(key)
-        observation = state.observation
+
+        # TODO verify
+        observation = state.turn * state.board / env.k
 
         (logits, value), _ = forward.apply(
             model_params, model_state, state.observation, is_eval=True
@@ -125,20 +139,24 @@ def selfplay(model, rng_key: jnp.ndarray) -> SelfplayOutput:
             root=root,
             recurrent_fn=recurrent_fn,
             num_simulations=config.num_simulations,
-            invalid_actions=~state.legal_action_mask,
+            # invalid_actions=~state.legal_action_mask,  # TODO
             qtransform=mctx.qtransform_completed_by_mix_value,
             gumbel_scale=1.0,
         )
-        actor = state.current_player
         keys = jax.random.split(key2, batch_size)
-        state = jax.vmap(auto_reset(env.step, env.init))(state, policy_output.action, keys)
+        # state = jax.vmap(auto_reset(env.step, env.init))(state, policy_output.action, keys)
+        state, reward = jax.vmap(env.step)(state, policy_output.action)
         discount = -1.0 * jnp.ones_like(value)
-        discount = jnp.where(state.terminated, 0.0, discount)
+
+        # TODO simplify
+        terminated = False
+        discount = jnp.where(terminated, 0.0, discount)
+
         return state, SelfplayOutput(
             obs=observation,
             action_weights=policy_output.action_weights,
-            reward=state.rewards[jnp.arange(state.rewards.shape[0]), actor],
-            terminated=state.terminated,
+            reward=reward,
+            terminated=terminated,
             discount=discount,
         )
 
@@ -214,36 +232,36 @@ def train(model, opt_state, data: Sample):
     return model, opt_state, policy_loss, value_loss
 
 
-@jax.pmap
-def evaluate(rng_key, my_model):
-    """A simplified evaluation by sampling. Only for debugging. 
-    Please use MCTS and run tournaments for serious evaluation."""
-    my_player = 0
-    my_model_params, my_model_state = my_model
+# @jax.pmap
+# def evaluate(rng_key, my_model):
+#     """A simplified evaluation by sampling. Only for debugging.
+#     Please use MCTS and run tournaments for serious evaluation."""
+#     my_player = 0
+#     my_model_params, my_model_state = my_model
 
-    key, subkey = jax.random.split(rng_key)
-    batch_size = config.selfplay_batch_size // num_devices
-    keys = jax.random.split(subkey, batch_size)
-    state = jax.vmap(env.init)(keys)
+#     key, subkey = jax.random.split(rng_key)
+#     batch_size = config.selfplay_batch_size // num_devices
+#     keys = jax.random.split(subkey, batch_size)
+#     state = jax.vmap(env.init)(keys)
 
-    def body_fn(val):
-        key, state, R = val
-        (my_logits, _), _ = forward.apply(
-            my_model_params, my_model_state, state.observation, is_eval=True
-        )
-        opp_logits, _ = baseline(state.observation)
-        is_my_turn = (state.current_player == my_player).reshape((-1, 1))
-        logits = jnp.where(is_my_turn, my_logits, opp_logits)
-        key, subkey = jax.random.split(key)
-        action = jax.random.categorical(subkey, logits, axis=-1)
-        state = jax.vmap(env.step)(state, action)
-        R = R + state.rewards[jnp.arange(batch_size), my_player]
-        return (key, state, R)
+#     def body_fn(val):
+#         key, state, R = val
+#         (my_logits, _), _ = forward.apply(
+#             my_model_params, my_model_state, state.observation, is_eval=True
+#         )
+#         opp_logits, _ = baseline(state.observation)
+#         is_my_turn = (state.current_player == my_player).reshape((-1, 1))
+#         logits = jnp.where(is_my_turn, my_logits, opp_logits)
+#         key, subkey = jax.random.split(key)
+#         action = jax.random.categorical(subkey, logits, axis=-1)
+#         state = jax.vmap(env.step)(state, action)
+#         R = R + state.rewards[jnp.arange(batch_size), my_player]
+#         return (key, state, R)
 
-    _, _, R = jax.lax.while_loop(
-        lambda x: ~(x[1].terminated.all()), body_fn, (key, state, jnp.zeros(batch_size))
-    )
-    return R
+#     _, _, R = jax.lax.while_loop(
+#         lambda x: ~(x[1].terminated.all()), body_fn, (key, state, jnp.zeros(batch_size))
+#     )
+#     return R
 
 
 if __name__ == "__main__":
@@ -271,36 +289,36 @@ if __name__ == "__main__":
 
     rng_key = jax.random.PRNGKey(config.seed)
     while True:
-        if iteration % config.eval_interval == 0:
-            # Evaluation
-            rng_key, subkey = jax.random.split(rng_key)
-            keys = jax.random.split(subkey, num_devices)
-            R = evaluate(keys, model)
-            log.update(
-                {
-                    f"eval/vs_baseline/avg_R": R.mean().item(),
-                    f"eval/vs_baseline/win_rate": ((R == 1).sum() / R.size).item(),
-                    f"eval/vs_baseline/draw_rate": ((R == 0).sum() / R.size).item(),
-                    f"eval/vs_baseline/lose_rate": ((R == -1).sum() / R.size).item(),
-                }
-            )
+        # if iteration % config.eval_interval == 0:
+        #     # Evaluation
+        #     rng_key, subkey = jax.random.split(rng_key)
+        #     keys = jax.random.split(subkey, num_devices)
+        #     R = evaluate(keys, model)
+        #     log.update(
+        #         {
+        #             f"eval/vs_baseline/avg_R": R.mean().item(),
+        #             f"eval/vs_baseline/win_rate": ((R == 1).sum() / R.size).item(),
+        #             f"eval/vs_baseline/draw_rate": ((R == 0).sum() / R.size).item(),
+        #             f"eval/vs_baseline/lose_rate": ((R == -1).sum() / R.size).item(),
+        #         }
+        #     )
 
-            # Store checkpoints
-            model_0, opt_state_0 = jax.tree_util.tree_map(lambda x: x[0], (model, opt_state))
-            with open(os.path.join(ckpt_dir, f"{iteration:06d}.ckpt"), "wb") as f:
-                dic = {
-                    "config": config,
-                    "rng_key": rng_key,
-                    "model": jax.device_get(model_0),
-                    "opt_state": jax.device_get(opt_state_0),
-                    "iteration": iteration,
-                    "frames": frames,
-                    "hours": hours,
-                    "pgx.__version__": pgx.__version__,
-                    "env_id": env.id,
-                    "env_version": env.version,
-                }
-                pickle.dump(dic, f)
+        #     # Store checkpoints
+        #     model_0, opt_state_0 = jax.tree_util.tree_map(lambda x: x[0], (model, opt_state))
+        #     with open(os.path.join(ckpt_dir, f"{iteration:06d}.ckpt"), "wb") as f:
+        #         dic = {
+        #             "config": config,
+        #             "rng_key": rng_key,
+        #             "model": jax.device_get(model_0),
+        #             "opt_state": jax.device_get(opt_state_0),
+        #             "iteration": iteration,
+        #             "frames": frames,
+        #             "hours": hours,
+        #             "pgx.__version__": pgx.__version__,
+        #             "env_id": env.id,
+        #             "env_version": env.version,
+        #         }
+        #         pickle.dump(dic, f)
 
         print(log)
         wandb.log(log)
