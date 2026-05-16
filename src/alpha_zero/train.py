@@ -28,8 +28,8 @@ import wandb
 from pydantic import BaseModel
 import tyro
 
-from src.network import AZNet
-from src.continual_go import ContinualGo, State
+from alpha_zero.network import AZNet
+from continual_go import ContinualGo, State
 
 devices = jax.local_devices()
 num_devices = len(devices)
@@ -76,15 +76,14 @@ optimizer = optax.adam(learning_rate=config.learning_rate)
 
 def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State):
     # model: params
-    # state: embedding
+    # state: embedding (batched)
     del rng_key
     model_params, model_state = model
 
-    current_player = state.current_player
     state, reward = jax.vmap(env.step)(state, action)
 
-    # TODO verify
-    obs = state.turn * state.board / env.k
+    # (batch, H, W, 1)
+    obs = (state.turn[:, None, None] * state.board / env.k)[..., None]
 
     (logits, value), _ = forward.apply(model_params, model_state, obs, is_eval=True)
 
@@ -93,8 +92,8 @@ def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State)
     # logits = logits - jnp.max(logits, axis=-1, keepdims=True)
     # logits = jnp.where(state.legal_action_mask, logits, jnp.finfo(logits.dtype).min)
 
-    # TODO simplify this
-    terminated = False
+    # TODO simplify this — until termination logic is implemented, no episode terminates.
+    terminated = jnp.zeros_like(value, dtype=jnp.bool_)
     # reward = state.rewards[jnp.arange(state.rewards.shape[0]), current_player]
     value = jnp.where(terminated, 0.0, value)
     discount = -1.0 * jnp.ones_like(value)
@@ -125,11 +124,11 @@ def selfplay(model, rng_key: jnp.ndarray) -> SelfplayOutput:
     def step_fn(state, key) -> SelfplayOutput:
         key1, key2 = jax.random.split(key)
 
-        # TODO verify
-        observation = state.turn * state.board / env.k
+        # observation: (batch, H, W, 1) — turn is per-batch scalar, broadcast over H,W.
+        observation = (state.turn[:, None, None] * state.board / env.k)[..., None]
 
         (logits, value), _ = forward.apply(
-            model_params, model_state, state.observation, is_eval=True
+            model_params, model_state, observation, is_eval=True
         )
         root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=state)
 
@@ -148,8 +147,8 @@ def selfplay(model, rng_key: jnp.ndarray) -> SelfplayOutput:
         state, reward = jax.vmap(env.step)(state, policy_output.action)
         discount = -1.0 * jnp.ones_like(value)
 
-        # TODO simplify
-        terminated = False
+        # TODO simplify — until termination logic is implemented, no episode terminates.
+        terminated = jnp.zeros((batch_size,), dtype=jnp.bool_)
         discount = jnp.where(terminated, 0.0, discount)
 
         return state, SelfplayOutput(
@@ -162,8 +161,14 @@ def selfplay(model, rng_key: jnp.ndarray) -> SelfplayOutput:
 
     # Run selfplay for max_num_steps by batch
     rng_key, sub_key = jax.random.split(rng_key)
-    keys = jax.random.split(sub_key, batch_size)
-    state = jax.vmap(env.init)(keys)
+    # mctx and the network expect a leading batch axis on every leaf of `state`.
+    init_state = env.init()
+    state = jax.tree.map(
+        lambda x: jnp.broadcast_to(
+            jnp.asarray(x)[None], (batch_size,) + jnp.asarray(x).shape
+        ),
+        init_state,
+    )
     key_seq = jax.random.split(rng_key, config.max_num_steps)
     _, data = jax.lax.scan(step_fn, state, key_seq)
 
@@ -268,17 +273,24 @@ if __name__ == "__main__":
     wandb.init(project="pgx-az", config=config.model_dump())
 
     # Initialize model and opt_state
-    dummy_state = jax.vmap(env.init)(jax.random.split(jax.random.PRNGKey(0), 2))
-    dummy_input = dummy_state.observation
+    dummy_state = env.init()
+    # (N=1, H, W, C=1): batched single example, one channel for the board state.
+    dummy_input = dummy_state.board.reshape(
+        1, config.board_size, config.board_size, 1
+    ).astype(jnp.float32)
     model = forward.init(jax.random.PRNGKey(0), dummy_input)  # (params, state)
     opt_state = optimizer.init(params=model[0])
-    # replicates to all devices
-    model, opt_state = jax.device_put_replicated((model, opt_state), devices)
+    # replicates to all devices (drop-in for the deprecated jax.device_put_replicated)
+    # We just add a leading device axis; the @jax.pmap'd functions below handle placement.
+    def _replicate(x):
+        return jnp.broadcast_to(x[None], (num_devices,) + x.shape)
+
+    model, opt_state = jax.tree.map(_replicate, (model, opt_state))
 
     # Prepare checkpoint dir
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     now = now.strftime("%Y%m%d%H%M%S")
-    ckpt_dir = os.path.join("checkpoints", f"{config.env_id}_{now}")
+    ckpt_dir = os.path.join("checkpoints", f"continual_go_az_{now}")
     os.makedirs(ckpt_dir, exist_ok=True)
 
     # Initialize logging dict
