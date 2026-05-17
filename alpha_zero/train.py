@@ -28,7 +28,7 @@ import wandb
 from pydantic import BaseModel
 import tyro
 
-from alpha_zero.network import AZNet
+from network import AZNet
 from continual_go import ContinualGo, State
 
 devices = jax.local_devices()

@@ -1,7 +1,7 @@
 [project]
 name = "continual-go"
 version = "0.1.0"
-description = "Add your description here"
+description = "A big world environment for continual reinforcement learning"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -10,6 +10,10 @@ dependencies = [
     "jaxtyping>=0.3.9",
     "matplotlib>=3.10.8",
     "numpy>=2.4.3",
-    "pydantic>=2.13.4",
-    "wandb>=0.27.0",
+]
+
+[tool.uv.workspace]
+members = [
+    "alpha_zero",
+    ".",
 ]
