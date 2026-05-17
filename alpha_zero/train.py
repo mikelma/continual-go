@@ -1,16 +1,4 @@
-# Copyright 2023 The Pgx Authors. All Rights Reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+# modified from: https://github.com/sotetsuk/pgx/blob/main/examples/alphazero/train.py
 
 import datetime
 import os
@@ -39,19 +27,25 @@ class Config(BaseModel):
     board_size: int = 9
     max_stones: int = 32
 
+    wandb: bool = False
+
     seed: int = 42
     max_num_iters: int = 400
+
     # network params
     num_channels: int = 128
     num_layers: int = 6
     resnet_v2: bool = True
+
     # selfplay params
     selfplay_batch_size: int = 1024
     num_simulations: int = 32
     max_num_steps: int = 256
+
     # training params
     training_batch_size: int = 4096
     learning_rate: float = 0.001
+
     # eval params
     eval_interval: int = 5
 
@@ -200,6 +194,7 @@ def compute_loss_input(data: SelfplayOutput) -> Sample:
         jnp.zeros(batch_size),
         jnp.arange(config.max_num_steps),
     )
+
     value_tgt = value_tgt[::-1, :]
 
     return Sample(
@@ -270,6 +265,9 @@ def train(model, opt_state, data: Sample):
 
 
 if __name__ == "__main__":
+    if not config.wandb:
+        os.environ["WANDB_MODE"] = "disabled"
+
     wandb.init(project="pgx-az", config=config.model_dump())
 
     # Initialize model and opt_state
