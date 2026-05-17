@@ -49,6 +49,7 @@ class Config(BaseModel):
     # eval params
     eval_interval: int = 5
 
+    save_interval: int = 5
 
 config = tyro.cli(Config)
 env = ContinualGo(size=config.board_size, k=config.max_stones)
@@ -313,22 +314,20 @@ if __name__ == "__main__":
         #         }
         #     )
 
-        #     # Store checkpoints
-        #     model_0, opt_state_0 = jax.tree_util.tree_map(lambda x: x[0], (model, opt_state))
-        #     with open(os.path.join(ckpt_dir, f"{iteration:06d}.ckpt"), "wb") as f:
-        #         dic = {
-        #             "config": config,
-        #             "rng_key": rng_key,
-        #             "model": jax.device_get(model_0),
-        #             "opt_state": jax.device_get(opt_state_0),
-        #             "iteration": iteration,
-        #             "frames": frames,
-        #             "hours": hours,
-        #             "pgx.__version__": pgx.__version__,
-        #             "env_id": env.id,
-        #             "env_version": env.version,
-        #         }
-        #         pickle.dump(dic, f)
+        # Store checkpoints
+        if iteration % config.save_interval == 0:
+            model_0, opt_state_0 = jax.tree_util.tree_map(lambda x: x[0], (model, opt_state))
+            with open(os.path.join(ckpt_dir, f"{iteration:06d}.ckpt"), "wb") as f:
+                dic = {
+                       "config": config,
+                       "rng_key": rng_key,
+                       "model": jax.device_get(model_0),
+                       "opt_state": jax.device_get(opt_state_0),
+                       "iteration": iteration,
+                       "frames": frames,
+                       "hours": hours,
+                }
+                pickle.dump(dic, f)
 
         print(log)
         wandb.log(log)
