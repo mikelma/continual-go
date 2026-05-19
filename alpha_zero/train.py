@@ -83,9 +83,9 @@ def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State)
 
     (logits, value), _ = forward.apply(model_params, model_state, obs, is_eval=True)
 
-    #legal-action mask: opponent can play any empty cell
-    occupancy_free = (state.board == 0).reshape(logits.shape)
-    logits = jnp.where(occupancy_free, logits, jnp.finfo(logits.dtype).min)
+    # full legal-action mask: empty + non-suicide + not-ko
+    legal = jax.vmap(env.legal_actions)(state).reshape(logits.shape)
+    logits = jnp.where(legal, logits, jnp.finfo(logits.dtype).min)
 
     # normalize reward to match the tanh-bounded value head
     #TODO(Esraa): not sure about this normalization, could remove the tanh from the value head instead
@@ -120,8 +120,8 @@ def selfplay(model, state: State, rng_key: jnp.ndarray) -> tuple[SelfplayOutput,
             model_params, model_state, observation, is_eval=True
         )
 
-        # occupancy-only legal-action mask at the MCTS root
-        invalid_actions = (state.board != 0).reshape(logits.shape)
+        # full legal-action mask at the MCTS root
+        invalid_actions = ~jax.vmap(env.legal_actions)(state).reshape(logits.shape)
 
         root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=state)
 
