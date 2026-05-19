@@ -93,16 +93,18 @@ def act_randomly(key, mask):
 def play(model, state: State, rng_key: jnp.ndarray):
     model_params, model_state = model
 
+    state = jax.tree.map(lambda x: x[None], state)
+
     def step_fn(state, key):
         # observation: (batch, H, W, 1) — turn is per-batch scalar, broadcast over H,W.
-        observation = (state.turn * state.board / env.k)[..., None]
+        observation = (state.turn[:, None, None] * state.board / env.k)[..., None]
 
         (logits, value), _ = forward.apply(
             model_params, model_state, observation, is_eval=True
         )
 
         # occupancy-only legal-action mask at the MCTS root
-        legal_actions = env.legal_actions(state)
+        legal_actions = jax.vmap(env.legal_actions)(state)
         invalid_actions = (~legal_actions).reshape(logits.shape)
 
         root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=state)
@@ -118,22 +120,23 @@ def play(model, state: State, rng_key: jnp.ndarray):
             qtransform=mctx.qtransform_completed_by_mix_value,
             gumbel_scale=1.0,
         )
-        state_az, reward_az = env.step(state, policy_output.action)
+        state_az, reward_az = jax.vmap(env.step)(state, policy_output.action)
 
         # Run a random agent as the opponent
         key, key_act = jax.random.split(key)
-        mask = env.legal_actions(state_az)
-        action = act_randomly(key, mask)
+        mask = jax.vmap(env.legal_actions)(state_az)
+        keys_act = jax.random.split(key_act, mask.shape[0])
+        action = jax.vmap(act_randomly)(keys_act, mask)
 
-        state_op, reward_op = env.step(state_az, policy_output.action)
+        state_op, reward_op = jax.vmap(env.step)(state_az, action)
 
-        return state, (state_az, state_op, reward_az, reward_op)
+        return state_op, (state_az, state_op, reward_az, reward_op)
 
     key_seq = jax.random.split(rng_key, config.max_num_steps)
     final_state, data = jax.lax.scan(step_fn, state, key_seq)
 
     print(data)
-    quit()
+    #quit()
     return data, final_state
 
 
