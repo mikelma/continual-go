@@ -27,7 +27,7 @@ class Config(BaseModel):
     board_size: int = 9
     max_stones: int = 32
 
-    wandb: bool = False
+    wandb: bool = True
 
     seed: int = 42
     max_num_iters: int = 400
@@ -45,6 +45,7 @@ class Config(BaseModel):
     # training params
     training_batch_size: int = 4096
     learning_rate: float = 0.001
+    gamma: float = 0.99  # discount factor for the continuing/infinite-horizon return
 
     # eval params
     eval_interval: int = 5
@@ -82,17 +83,15 @@ def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State)
 
     (logits, value), _ = forward.apply(model_params, model_state, obs, is_eval=True)
 
-    # TODO implement this
-    # mask invalid actions
-    # logits = logits - jnp.max(logits, axis=-1, keepdims=True)
-    # logits = jnp.where(state.legal_action_mask, logits, jnp.finfo(logits.dtype).min)
+    #legal-action mask: opponent can play any empty cell
+    occupancy_free = (state.board == 0).reshape(logits.shape)
+    logits = jnp.where(occupancy_free, logits, jnp.finfo(logits.dtype).min)
 
-    # TODO simplify this — until termination logic is implemented, no episode terminates.
-    terminated = jnp.zeros_like(value, dtype=jnp.bool_)
-    # reward = state.rewards[jnp.arange(state.rewards.shape[0]), current_player]
-    value = jnp.where(terminated, 0.0, value)
-    discount = -1.0 * jnp.ones_like(value)
-    discount = jnp.where(terminated, 0.0, discount)
+    # normalize reward to match the tanh-bounded value head
+    #TODO(Esraa): not sure about this normalization, could remove the tanh from the value head instead
+    reward = reward.astype(value.dtype) / env.k
+
+    discount = -config.gamma * jnp.ones_like(value)
 
     recurrent_fn_output = mctx.RecurrentFnOutput(
         reward=reward,
@@ -106,93 +105,79 @@ def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State)
 class SelfplayOutput(NamedTuple):
     obs: jnp.ndarray
     reward: jnp.ndarray
-    terminated: jnp.ndarray
     action_weights: jnp.ndarray
-    discount: jnp.ndarray
 
 
 @jax.pmap
-def selfplay(model, rng_key: jnp.ndarray) -> SelfplayOutput:
+def selfplay(model, state: State, rng_key: jnp.ndarray) -> tuple[SelfplayOutput, State]:
     model_params, model_state = model
-    batch_size = config.selfplay_batch_size // num_devices
 
-    def step_fn(state, key) -> SelfplayOutput:
-        key1, key2 = jax.random.split(key)
-
+    def step_fn(state, key) -> tuple[State, SelfplayOutput]:
         # observation: (batch, H, W, 1) — turn is per-batch scalar, broadcast over H,W.
         observation = (state.turn[:, None, None] * state.board / env.k)[..., None]
 
         (logits, value), _ = forward.apply(
             model_params, model_state, observation, is_eval=True
         )
+
+        # occupancy-only legal-action mask at the MCTS root
+        invalid_actions = (state.board != 0).reshape(logits.shape)
+
         root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=state)
 
         policy_output = mctx.gumbel_muzero_policy(
             params=model,
-            rng_key=key1,
+            rng_key=key,
             root=root,
             recurrent_fn=recurrent_fn,
             num_simulations=config.num_simulations,
-            # invalid_actions=~state.legal_action_mask,  # TODO
+            invalid_actions=invalid_actions,
             qtransform=mctx.qtransform_completed_by_mix_value,
             gumbel_scale=1.0,
         )
-        keys = jax.random.split(key2, batch_size)
-        # state = jax.vmap(auto_reset(env.step, env.init))(state, policy_output.action, keys)
         state, reward = jax.vmap(env.step)(state, policy_output.action)
-        discount = -1.0 * jnp.ones_like(value)
-
-        # TODO simplify — until termination logic is implemented, no episode terminates.
-        terminated = jnp.zeros((batch_size,), dtype=jnp.bool_)
-        discount = jnp.where(terminated, 0.0, discount)
 
         return state, SelfplayOutput(
             obs=observation,
             action_weights=policy_output.action_weights,
             reward=reward,
-            terminated=terminated,
-            discount=discount,
         )
 
-    # Run selfplay for max_num_steps by batch
-    rng_key, sub_key = jax.random.split(rng_key)
-    # mctx and the network expect a leading batch axis on every leaf of `state`.
-    init_state = env.init()
-    state = jax.tree.map(
-        lambda x: jnp.broadcast_to(
-            jnp.asarray(x)[None], (batch_size,) + jnp.asarray(x).shape
-        ),
-        init_state,
-    )
     key_seq = jax.random.split(rng_key, config.max_num_steps)
-    _, data = jax.lax.scan(step_fn, state, key_seq)
+    final_state, data = jax.lax.scan(step_fn, state, key_seq)
 
-    return data
+    return data, final_state
 
 
 class Sample(NamedTuple):
     obs: jnp.ndarray
     policy_tgt: jnp.ndarray
     value_tgt: jnp.ndarray
-    mask: jnp.ndarray
 
 
 @jax.pmap
-def compute_loss_input(data: SelfplayOutput) -> Sample:
-    batch_size = config.selfplay_batch_size // num_devices
-    # If episode is truncated, there is no value target
-    # So when we compute value loss, we need to mask it
-    value_mask = jnp.cumsum(data.terminated[::-1, :], axis=0)[::-1, :] >= 1
+def compute_loss_input(model, data: SelfplayOutput, final_state: State) -> Sample:
+    model_params, model_state = model
 
-    # Compute value target
+    # bootstrap V(s_T) from the network for the truncated tail.
+    final_obs = (
+        final_state.turn[:, None, None] * final_state.board / env.k
+    )[..., None]
+    (_, v_T), _ = forward.apply(model_params, model_state, final_obs, is_eval=True)
+    v_T = jax.lax.stop_gradient(v_T)
+
+    # reverse-accumulate the discounted return with two-player sign flip.
+    # v_t = (r_t / k) + (-gamma) * v_{t+1};  init carry = V(s_T).
+    discount = -config.gamma
+
     def body_fn(carry, i):
         ix = config.max_num_steps - i - 1
-        v = data.reward[ix] + data.discount[ix] * carry
+        v = data.reward[ix].astype(carry.dtype) / env.k + discount * carry
         return v, v
 
     _, value_tgt = jax.lax.scan(
         body_fn,
-        jnp.zeros(batch_size),
+        v_T,
         jnp.arange(config.max_num_steps),
     )
 
@@ -202,7 +187,6 @@ def compute_loss_input(data: SelfplayOutput) -> Sample:
         obs=data.obs,
         policy_tgt=data.action_weights,
         value_tgt=value_tgt,
-        mask=value_mask,
     )
 
 
@@ -214,8 +198,7 @@ def loss_fn(model_params, model_state, samples: Sample):
     policy_loss = optax.softmax_cross_entropy(logits, samples.policy_tgt)
     policy_loss = jnp.mean(policy_loss)
 
-    value_loss = optax.l2_loss(value, samples.value_tgt)
-    value_loss = jnp.mean(value_loss * samples.mask)  # mask if the episode is truncated
+    value_loss = jnp.mean(optax.l2_loss(value, samples.value_tgt))
 
     return policy_loss + value_loss, (model_state, policy_loss, value_loss)
 
@@ -286,6 +269,18 @@ if __name__ == "__main__":
 
     model, opt_state = jax.tree.map(_replicate, (model, opt_state))
 
+    # persistent env state across iterations (never reset).
+    # Shape per leaf: (num_devices, batch_per_device, ...).
+    batch_per_device = config.selfplay_batch_size // num_devices
+    init_state = env.init()
+    state = jax.tree.map(
+        lambda x: jnp.broadcast_to(
+            jnp.asarray(x)[None, None],
+            (num_devices, batch_per_device) + jnp.asarray(x).shape,
+        ),
+        init_state,
+    )
+
     # Prepare checkpoint dir
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     now = now.strftime("%Y%m%d%H%M%S")
@@ -339,11 +334,12 @@ if __name__ == "__main__":
         log = {"iteration": iteration}
         st = time.time()
 
-        # Selfplay
+        # Selfplay (continuing — state is carried over from the previous iteration)
         rng_key, subkey = jax.random.split(rng_key)
         keys = jax.random.split(subkey, num_devices)
-        data: SelfplayOutput = selfplay(model, keys)
-        samples: Sample = compute_loss_input(data)
+        data, state = selfplay(model, state, keys)
+        avg_reward = float(jax.device_get(data.reward).mean())
+        samples: Sample = compute_loss_input(model, data, state)
 
         # Shuffle samples and make minibatches
         samples = jax.device_get(samples)  # (#devices, batch, max_num_steps, ...)
@@ -373,6 +369,7 @@ if __name__ == "__main__":
             {
                 "train/policy_loss": policy_loss,
                 "train/value_loss": value_loss,
+                "train/avg_reward_per_step": avg_reward,
                 "hours": hours,
                 "frames": frames,
             }
