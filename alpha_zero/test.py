@@ -17,6 +17,8 @@ from network import AZNet
 class Args(BaseModel):
     load_path: str
 
+    seed: int = 42
+
     board_size: int = 9
     max_stones: int = 32
 
@@ -80,12 +82,20 @@ def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State)
     return recurrent_fn_output, state
 
 
+def act_randomly(key, mask):
+    """Ignore observation and choose randomly from legal actions"""
+    mask = mask.reshape(-1)
+    probs = mask / mask.sum()
+    logits = jnp.maximum(jnp.log(probs), jnp.finfo(probs.dtype).min)
+    return jax.random.categorical(key, logits=logits, axis=-1)
+
+
 def play(model, state: State, rng_key: jnp.ndarray):
     model_params, model_state = model
 
-    def step_fn(state, key) -> tuple[State, SelfplayOutput]:
+    def step_fn(state, key):
         # observation: (batch, H, W, 1) — turn is per-batch scalar, broadcast over H,W.
-        observation = (state.turn[:, None, None] * state.board / env.k)[..., None]
+        observation = (state.turn * state.board / env.k)[..., None]
 
         (logits, value), _ = forward.apply(
             model_params, model_state, observation, is_eval=True
@@ -97,9 +107,10 @@ def play(model, state: State, rng_key: jnp.ndarray):
 
         root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=state)
 
+        key, mctx_key = jax.random.split(key)
         policy_output = mctx.gumbel_muzero_policy(
             params=model,
-            rng_key=key,
+            rng_key=mctx_key,
             root=root,
             recurrent_fn=recurrent_fn,
             num_simulations=config.num_simulations,
@@ -107,17 +118,22 @@ def play(model, state: State, rng_key: jnp.ndarray):
             qtransform=mctx.qtransform_completed_by_mix_value,
             gumbel_scale=1.0,
         )
-        state, reward = jax.vmap(env.step)(state, policy_output.action)
+        state_az, reward_az = env.step(state, policy_output.action)
 
-        return state, SelfplayOutput(
-            obs=observation,
-            action_weights=policy_output.action_weights,
-            reward=reward,
-        )
+        # Run a random agent as the opponent
+        key, key_act = jax.random.split(key)
+        mask = env.legal_actions(state_az)
+        action = act_randomly(key, mask)
+
+        state_op, reward_op = env.step(state_az, policy_output.action)
+
+        return state, (state_az, state_op, reward_az, reward_op)
 
     key_seq = jax.random.split(rng_key, config.max_num_steps)
     final_state, data = jax.lax.scan(step_fn, state, key_seq)
 
+    print(data)
+    quit()
     return data, final_state
 
 
@@ -151,6 +167,11 @@ def load_checkpoint(ckpt_path):
 if __name__ == "__main__":
     args = tyro.cli(Args)
 
+    key = jax.random.key(args.seed)
+
     ckpt_data = load_checkpoint(args.load_path)
-    params = ckpt_data["model"]
+    model = ckpt_data["model"]
+
+    state = env.init()
+    play(model, state, key)
     # print(params)
