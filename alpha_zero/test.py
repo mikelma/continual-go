@@ -15,7 +15,7 @@ from network import AZNet
 
 
 class Args(BaseModel):
-    load_path: str
+    load_path: str = "checkpoints/000025.ckpt"
 
     seed: int = 42
 
