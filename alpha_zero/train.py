@@ -24,7 +24,7 @@ devices = jax.local_devices()
 num_devices = len(devices)
 
 config = tyro.cli(Config)
-env = ContinualGo(size=config.board_size, k=config.max_stones)
+env = ContinualGo(size=config.board_size, k=config.max_stones, opponent_model=None, az_config=None)
 
 def forward_fn(x, is_eval=False):
     net = AZNet(
@@ -47,7 +47,7 @@ def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State)
     del rng_key
     model_params, model_state = model
 
-    state, reward = jax.vmap(env.step)(state, action)
+    state, reward = jax.vmap(env.step_turn)(state, action)
 
     # (batch, H, W, 1)
     obs = (state.turn[:, None, None] * state.board / env.k)[..., None]
@@ -106,7 +106,7 @@ def selfplay(model, state: State, rng_key: jnp.ndarray) -> tuple[SelfplayOutput,
             qtransform=mctx.qtransform_completed_by_mix_value,
             gumbel_scale=1.0,
         )
-        state, reward = jax.vmap(env.step)(state, policy_output.action)
+        state, reward = jax.vmap(env.step_turn)(state, policy_output.action)
 
         return state, SelfplayOutput(
             obs=observation,
@@ -209,7 +209,7 @@ def train(model, opt_state, data: Sample):
 #         logits = jnp.where(is_my_turn, my_logits, opp_logits)
 #         key, subkey = jax.random.split(key)
 #         action = jax.random.categorical(subkey, logits, axis=-1)
-#         state = jax.vmap(env.step)(state, action)
+#         state = jax.vmap(env.step_turn)(state, action)
 #         R = R + state.rewards[jnp.arange(batch_size), my_player]
 #         return (key, state, R)
 
