@@ -3,8 +3,16 @@ import jax.numpy as jnp
 from flax import struct
 from flax.struct import PyTreeNode
 from jaxtyping import Scalar, ScalarLike, Array, Integer, Float, PRNGKeyArray, Bool
-from typing import TypeAlias
+from typing import TypeAlias, Any
+import haiku as hk
+import pickle
+import mctx
 
+from alpha_zero.config import Config
+from alpha_zero.network import AZNet
+
+import __main__
+__main__.Config = Config
 
 IntLike: TypeAlias = Integer[ScalarLike, ""]
 
@@ -136,16 +144,79 @@ def _adj_ixs(xy: IntLike, n: int) -> jax.Array:
     )
 
 
+def load_checkpoint(ckpt_path):
+    with open(ckpt_path, "rb") as f:
+        checkpoint = pickle.load(f)
+
+    # Extract the individual components
+    config = checkpoint["config"]
+    rng_key = checkpoint["rng_key"]
+    model_params = checkpoint["model"]
+    opt_state = checkpoint["opt_state"]
+    iteration = checkpoint["iteration"]
+    frames = checkpoint["frames"]
+    hours = checkpoint["hours"]
+
+    # Move the parameters and optimizer state back to the device
+    model_params = jax.device_put(model_params)
+    opt_state = jax.device_put(opt_state)
+
+    return {
+        "config": config,
+        "rng_key": rng_key,
+        "model": model_params,
+        "opt_state": opt_state,
+        "iteration": iteration,
+        "frames": frames,
+        "hours": hours
+    }
+
+
+def forward_fn(x, num_actions, cfg):
+    net = AZNet(
+        num_actions=num_actions,
+        num_channels=cfg.num_channels,
+        num_blocks=cfg.num_layers,
+        resnet_v2=cfg.resnet_v2,
+    )
+    policy_out, value_out = net(x, is_training=False, test_local_stats=False)
+    return policy_out, value_out
+
+
+forward = hk.without_apply_rng(hk.transform_with_state(forward_fn))
+
+
 # -------- the environment --------
 
 
 class ContinualGo(PyTreeNode):
     size: int = struct.field(pytree_node=False)
     k: int = struct.field(pytree_node=False)  # max number of stones per player
+    opponent_model: Any = struct.field(pytree_node=True)
+    az_config: Any = struct.field(pytree_node=True)
 
     @property
     def num_actions(self) -> IntLike:
         return self.size * self.size
+
+    @classmethod
+    def create(cls, size: int, k: int, opponent_path: str):
+        ckpt_data = load_checkpoint(opponent_path)
+        return cls(
+            size=size,
+            k=k,
+            opponent_model=ckpt_data["model"],
+            az_config=ckpt_data["config"],
+        )
+
+    @classmethod
+    def create_selfplay(cls, size: int, k: int):
+        return cls(
+            size=size,
+            k=k,
+            opponent_model=None,
+            az_config=None
+        )
 
     def init(self) -> State:
         n = self.size
@@ -159,7 +230,73 @@ class ContinualGo(PyTreeNode):
             idx_squared_sum=jnp.zeros(n * n, dtype=jnp.int32),
         )
 
-    def step(self, state: State, action: IntLike) -> tuple[State, ScalarLike]:
+    def step(self, key, state, action: IntLike) -> tuple[State, ScalarLike]:
+        # step function used for planning
+        def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State):
+            del rng_key
+            model_params, model_state = model
+
+            state, reward = jax.vmap(self.step_turn)(state, action)
+
+            # (batch, H, W, 1)
+            obs = (state.turn[:, None, None] * state.board / self.k)[..., None]
+
+            (logits, value), _ = forward.apply(
+                model_params, model_state, obs, num_actions=self.num_actions, cfg=self.az_config
+            )
+
+            # full legal-action mask: empty + non-suicide + not-ko
+            legal = jax.vmap(self.legal_actions)(state).reshape(logits.shape)
+            logits = jnp.where(legal, logits, jnp.finfo(logits.dtype).min)
+
+            # normalize reward to match the tanh-bounded value head
+            reward = reward.astype(value.dtype) / self.k
+
+            discount = -self.az_config.gamma * jnp.ones_like(value)
+
+            recurrent_fn_output = mctx.RecurrentFnOutput(
+                reward=reward,
+                discount=discount,
+                prior_logits=logits,
+                value=value,
+                )
+            return recurrent_fn_output, state
+
+        # execute the player's action
+        state, player_reward = self.step_turn(state, action)
+
+        # run AlphaZero
+        observation = (state.turn * state.board / self.k)[None, ..., None]
+
+        model_params, model_state = self.opponent_model
+
+        (logits, value), _ = forward.apply(
+            model_params, model_state, observation, num_actions=self.num_actions, cfg=self.az_config
+        )
+
+        legal_actions = self.legal_actions(state)
+        invalid_actions = (~legal_actions).reshape(1, self.num_actions)
+
+        batched_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), state)
+        root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=batched_state)
+
+        policy_output = mctx.gumbel_muzero_policy(
+            params=self.opponent_model,
+            rng_key=key,
+            root=root,
+            recurrent_fn=recurrent_fn,
+            num_simulations=self.az_config.num_simulations,
+            invalid_actions=invalid_actions,
+            qtransform=mctx.qtransform_completed_by_mix_value,
+            gumbel_scale=1.0,
+        )
+
+        next_state, reward_az = self.step_turn(state, policy_output.action[0])
+
+        return next_state, player_reward - reward_az
+
+    def step_turn(self, state: State, action: IntLike) -> tuple[State, ScalarLike]:
+        """Single turn step (useful for self-play)."""
         n = self.size
         action = jnp.minimum(jnp.array(n * n - 1), action)
         i = action // n
