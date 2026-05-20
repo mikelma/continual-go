@@ -1,7 +1,7 @@
 import jax
 import tyro
 import haiku as hk
-
+import matplotlib.pyplot as plt
 import os
 import pickle
 import jax
@@ -90,6 +90,7 @@ def act_randomly(key, mask):
     return jax.random.categorical(key, logits=logits, axis=-1)
 
 
+@jax.jit
 def play(model, state: State, rng_key: jnp.ndarray):
     model_params, model_state = model
 
@@ -130,14 +131,12 @@ def play(model, state: State, rng_key: jnp.ndarray):
 
         state_op, reward_op = jax.vmap(env.step)(state_az, action)
 
-        return state_op, (state_az, state_op, reward_az, reward_op)
+        return state_op, (state_az.board, state_op.board, reward_az, reward_op)
 
     key_seq = jax.random.split(rng_key, config.max_num_steps)
     final_state, data = jax.lax.scan(step_fn, state, key_seq)
 
-    print(data)
-    #quit()
-    return data, final_state
+    return data
 
 
 def load_checkpoint(ckpt_path):
@@ -176,5 +175,11 @@ if __name__ == "__main__":
     model = ckpt_data["model"]
 
     state = env.init()
-    play(model, state, key)
-    # print(params)
+    board_az, board_op, reward_az, reward_op = play(model, state, key)
+
+    plt.plot(jnp.cumsum(reward_az), label="AZ")
+    plt.plot(jnp.cumsum(reward_op), label="RND")
+    plt.ylabel("Sum of rewards")
+    plt.xlabel("Steps")
+    plt.legend()
+    plt.show()
