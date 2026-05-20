@@ -119,11 +119,18 @@ if __name__ == "__main__":
     label_a = args.load_path_a.split("/")[-1]
     label_b = args.load_path_b.split("/")[-1]
 
-    plt.plot(jnp.cumsum(reward_a), label=f"A: {label_a}")
-    plt.plot(jnp.cumsum(reward_b), label=f"B: {label_b}")
-    plt.ylabel("Cumulative reward")
-    plt.xlabel("Steps")
-    plt.legend()
+    font_size = 16
+    fig, ax = plt.subplots()
+    plt.rcParams.update({'font.size': font_size})
+    ax.plot(jnp.cumsum(reward_b), label="AlphaZero@100M frames", color='#2980b9')
+    ax.plot(jnp.cumsum(reward_a), label="AlphaZero@6M frames", color='#e74c3c')
+    ax.set_ylabel("Cumulative reward", fontsize=font_size)
+    ax.set_xlabel("Steps", fontsize=font_size)
+    ax.legend(fontsize=font_size,frameon=False)
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    plt.tight_layout()
+    plt.savefig("reward_curve.png", dpi=500)
     plt.show()
 
     # interleave A and B half-steps: board_a[t] then board_b[t]
