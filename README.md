@@ -13,6 +13,8 @@ Using [`uv`](https://docs.astral.sh/uv/) you can install the latest version (mai
 uv add git+https://github.com/mikelma/small-world.git
 ```
 
+**⚠️ TODO: Update to new API ⚠️**
+
 Now you can start using ContinualGo in your project! For example,
 
 ```python
