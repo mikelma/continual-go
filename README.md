@@ -1,4 +1,4 @@
-# ContiualGo ⚫⚪: A big world in a small board!
+# ContiualGo ⚫⚪: A big world on a small board!
 
 ContinualGO is an environment designed to challenge reinforcement learning algorithms in Big Worlds, see [Javed & Sutton (2024)](https://openreview.net/pdf?id=Sv7DazuCn8).
 
