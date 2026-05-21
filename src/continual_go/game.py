@@ -21,7 +21,11 @@ IntLike: TypeAlias = Integer[ScalarLike, ""]
 class State:
     # Board geometry & gameplay (unchanged semantics from the original env)
     board: Integer[Array, "size size"]                   # signed age: sign=color, magnitude=age
-    turn: IntLike                                         # -1 (black) or +1 (white)
+    turn: IntLike                                        # -1 (black) or +1 (white)
+
+
+    skill_level: ScalarLike
+    num_step: IntLike
 
     # PGX-style chain bookkeeping (recomputed at the end of every step)
     chain_id: Integer[Array, "size size"]                 # signed chain id; sign=color, 0=empty
@@ -182,6 +186,9 @@ def forward_fn(x, num_actions, cfg):
     policy_out, value_out = net(x, is_training=False, test_local_stats=False)
     return policy_out, value_out
 
+def level_update_linear(level: ScalarLike, t: IntLike, final_t: IntLike) -> ScalarLike:
+    return t / final_t
+
 
 forward = hk.without_apply_rng(hk.transform_with_state(forward_fn))
 
@@ -192,6 +199,7 @@ forward = hk.without_apply_rng(hk.transform_with_state(forward_fn))
 class ContinualGo(PyTreeNode):
     size: int = struct.field(pytree_node=False)
     k: int = struct.field(pytree_node=False)  # max number of stones per player
+    total_steps: int = struct.field(pytree_node=False)  # length of the experiment
     opponent_model: Any = struct.field(pytree_node=True)
     az_config: Any = struct.field(pytree_node=True)
 
@@ -200,13 +208,14 @@ class ContinualGo(PyTreeNode):
         return self.size * self.size
 
     @classmethod
-    def create(cls, size: int, k: int, opponent_path: str):
+    def create(cls, size: int, k: int, total_steps: int, opponent_path: str):
         ckpt_data = load_checkpoint(opponent_path)
         return cls(
             size=size,
             k=k,
             opponent_model=ckpt_data["model"],
             az_config=ckpt_data["config"],
+            total_steps=total_steps
         )
 
     @classmethod
@@ -215,7 +224,8 @@ class ContinualGo(PyTreeNode):
             size=size,
             k=k,
             opponent_model=None,
-            az_config=None
+            az_config=None,
+            total_steps=-1,  # this is ignored for self-play
         )
 
     def init(self) -> State:
@@ -228,6 +238,8 @@ class ContinualGo(PyTreeNode):
             num_pseudo=jnp.zeros(n * n, dtype=jnp.int32),
             idx_sum=jnp.zeros(n * n, dtype=jnp.int32),
             idx_squared_sum=jnp.zeros(n * n, dtype=jnp.int32),
+            skill_level=0,
+            num_step=0,
         )
 
     def step(self, key, state, action: IntLike) -> tuple[State, ScalarLike]:
@@ -259,7 +271,7 @@ class ContinualGo(PyTreeNode):
                 discount=discount,
                 prior_logits=logits,
                 value=value,
-                )
+            )
             return recurrent_fn_output, state
 
         # execute the player's action
@@ -280,6 +292,7 @@ class ContinualGo(PyTreeNode):
         batched_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), state)
         root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=batched_state)
 
+        # jax.debug.print("> num sims: {s}", s=(self.az_config.num_simulations * state.skill_level).astype(jnp.int32))
         policy_output = mctx.gumbel_muzero_policy(
             params=self.opponent_model,
             rng_key=key,
@@ -289,9 +302,17 @@ class ContinualGo(PyTreeNode):
             invalid_actions=invalid_actions,
             qtransform=mctx.qtransform_completed_by_mix_value,
             gumbel_scale=1.0,
+            max_depth=(self.az_config.num_simulations * state.skill_level).astype(jnp.int32),
         )
 
         next_state, reward_az = self.step_turn(state, policy_output.action[0])
+
+        next_step = next_state.num_step + 1
+        next_level = level_update_linear(next_state.skill_level, next_step, self.total_steps)
+        next_state = next_state.replace(
+            num_step=next_step,
+            skill_level=next_level,
+        )
 
         return next_state, player_reward - reward_az
 
