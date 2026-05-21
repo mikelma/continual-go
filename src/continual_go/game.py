@@ -292,10 +292,10 @@ class ContinualGo(PyTreeNode):
         batched_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), state)
         root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=batched_state)
 
-        # jax.debug.print("> num sims: {s}", s=(self.az_config.num_simulations * state.skill_level).astype(jnp.int32))
+        key_mctx, key_sample, key_noise = jax.random.split(key, 3)
         policy_output = mctx.gumbel_muzero_policy(
             params=self.opponent_model,
-            rng_key=key,
+            rng_key=key_mctx,
             root=root,
             recurrent_fn=recurrent_fn,
             num_simulations=self.az_config.num_simulations,
@@ -305,7 +305,13 @@ class ContinualGo(PyTreeNode):
             max_depth=(self.az_config.num_simulations * state.skill_level).astype(jnp.int32),
         )
 
-        next_state, reward_az = self.step_turn(state, policy_output.action[0])
+        noise = jax.random.uniform(key_noise, (self.num_actions,)) * (~invalid_actions)
+        noise /= noise.sum()
+        weights = state.skill_level * policy_output.action_weights + (1 - state.skill_level) * noise
+        action = jax.random.categorical(key_sample, weights)
+
+        # next_state, reward_az = self.step_turn(state, policy_output.action[0])
+        next_state, reward_az = self.step_turn(state, action)
 
         next_step = next_state.num_step + 1
         next_level = level_update_linear(next_state.skill_level, next_step, self.total_steps)
