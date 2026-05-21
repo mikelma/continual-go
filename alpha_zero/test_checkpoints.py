@@ -21,6 +21,8 @@ class Args(BaseModel):
 
     seed: int = 42
 
+    skill_level: float = 1.0
+
     board_size: int = 9
     max_stones: int = 32
 
@@ -43,7 +45,7 @@ forward = hk.without_apply_rng(hk.transform_with_state(forward_fn))
 
 
 @jax.jit
-def play(model_a, model_b, state: State, rng_key: jnp.ndarray):
+def play(model_a, model_b, state: State, rng_key: jnp.ndarray, skill_level: float = 1.0):
     state = jax.tree.map(lambda x: x[None], state)
 
     def step_fn(state, key):
@@ -76,7 +78,7 @@ def play(model_a, model_b, state: State, rng_key: jnp.ndarray):
         root_b = mctx.RootFnOutput(
             prior_logits=logits_b, value=value_b, embedding=state_a
         )
-        key, mctx_key = jax.random.split(key)
+        key, mctx_key, key_noise, key_sample = jax.random.split(key, num=4)
         policy_b = mctx.gumbel_muzero_policy(
             params=model_b,
             rng_key=mctx_key,
@@ -85,9 +87,15 @@ def play(model_a, model_b, state: State, rng_key: jnp.ndarray):
             num_simulations=config.num_simulations,
             invalid_actions=(~legal_b).reshape(logits_b.shape),
             qtransform=mctx.qtransform_completed_by_mix_value,
+            max_depth=(config.num_simulations * skill_level).astype(jnp.int32),
             gumbel_scale=1.0,
         )
-        state_b, reward_b = jax.vmap(env.step)(state_a, policy_b.action)
+        noise = jax.random.uniform(key_noise, (self.num_actions,)) * legal_b.reshape(logits_b.shape)
+        noise /= noise.sum()
+        weights = state.skill_level * policy_b.action_weights + (1 - state.skill_level) * noise
+        policy_b_action = jax.random.categorical(key_sample, weights)
+
+        state_b, reward_b = jax.vmap(env.step)(state_a, policy_b_action)
 
         return state_b, (state_a.board, state_b.board, reward_a, reward_b)
 
@@ -114,7 +122,7 @@ if __name__ == "__main__":
     model_b = load_checkpoint(args.load_path_b)["model"]
 
     state = env.init()
-    board_a, board_b, reward_a, reward_b = play(model_a, model_b, state, key)
+    board_a, board_b, reward_a, reward_b = play(model_a, model_b, state, key, args.skill_level)
 
     label_a = args.load_path_a.split("/")[-1]
     label_b = args.load_path_b.split("/")[-1]
@@ -122,8 +130,8 @@ if __name__ == "__main__":
     font_size = 16
     fig, ax = plt.subplots()
     plt.rcParams.update({'font.size': font_size})
-    ax.plot(jnp.cumsum(reward_b), label="AlphaZero@100M frames", color='#2980b9')
-    ax.plot(jnp.cumsum(reward_a), label="AlphaZero@6M frames", color='#e74c3c')
+    ax.plot(jnp.cumsum(reward_b), label="AlphaZero B", color='#2980b9')
+    ax.plot(jnp.cumsum(reward_a), label="AlphaZero A", color='#e74c3c')
     ax.set_ylabel("Cumulative reward", fontsize=font_size)
     ax.set_xlabel("Steps", fontsize=font_size)
     ax.legend(fontsize=font_size,frameon=False)
