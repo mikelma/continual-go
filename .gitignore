@@ -11,3 +11,9 @@ wheels/
 
 # Wandb logs
 wandb/
+
+*.png
+*.gif
+*.pdf 
+checkpoints/
+

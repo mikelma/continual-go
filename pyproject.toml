@@ -16,4 +16,5 @@ dependencies = [
 members = [
     "alpha_zero",
     ".",
+    "algorithms",
 ]
