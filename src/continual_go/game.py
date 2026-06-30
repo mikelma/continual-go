@@ -315,8 +315,8 @@ class ContinualGo(PyTreeNode):
             invalid_actions=invalid_actions,
             qtransform=mctx.qtransform_completed_by_mix_value,
             gumbel_scale=1.0,
-            max_depth=(self.az_config.num_simulations * state.skill_level).astype(
-                jnp.int32
+            max_depth=jnp.asarray(
+                self.az_config.num_simulations * state.skill_level, dtype=jnp.int32
             ),
         )
 
