@@ -8,10 +8,11 @@ import haiku as hk
 import pickle
 import mctx
 
-from alpha_zero.config import Config
-from alpha_zero.network import AZNet
+from .alpha_zero.config import Config
+from .alpha_zero.network import AZNet
 
 import __main__
+
 __main__.Config = Config
 
 IntLike: TypeAlias = Integer[ScalarLike, ""]
@@ -20,18 +21,17 @@ IntLike: TypeAlias = Integer[ScalarLike, ""]
 @struct.dataclass
 class State:
     # Board geometry & gameplay (unchanged semantics from the original env)
-    board: Integer[Array, "size size"]                   # signed age: sign=color, magnitude=age
-    turn: IntLike                                        # -1 (black) or +1 (white)
-
+    board: Integer[Array, "size size"]  # signed age: sign=color, magnitude=age
+    turn: IntLike  # -1 (black) or +1 (white)
 
     skill_level: ScalarLike
     num_step: IntLike
 
     # PGX-style chain bookkeeping (recomputed at the end of every step)
-    chain_id: Integer[Array, "size size"]                 # signed chain id; sign=color, 0=empty
-    ko: IntLike                                           # forbidden flat index, -1 if none
-    num_pseudo:      Integer[Array, "num_actions"]        # per-chain pseudo-liberty stats
-    idx_sum:         Integer[Array, "num_actions"]
+    chain_id: Integer[Array, "size size"]  # signed chain id; sign=color, 0=empty
+    ko: IntLike  # forbidden flat index, -1 if none
+    num_pseudo: Integer[Array, "num_actions"]  # per-chain pseudo-liberty stats
+    idx_sum: Integer[Array, "num_actions"]
     idx_squared_sum: Integer[Array, "num_actions"]
 
 
@@ -79,21 +79,21 @@ def _compute_chain_ids(signed_board: jax.Array) -> jax.Array:
     def body(carry):
         labels, _ = carry
         cands = []
-        for (di, dj) in _DIRS:
+        for di, dj in _DIRS:
             nbr_color = _shift(color, di, dj, fill=jnp.int32(0))
             nbr_labels = _shift(labels, di, dj, fill=SENTINEL)
             cands.append(
                 jnp.where((nbr_color == color) & occupied, nbr_labels, SENTINEL)
             )
         new_labels = jnp.minimum(
-            jnp.minimum(jnp.minimum(cands[0], cands[1]), jnp.minimum(cands[2], cands[3])),
+            jnp.minimum(
+                jnp.minimum(cands[0], cands[1]), jnp.minimum(cands[2], cands[3])
+            ),
             labels,
         )
         return new_labels, jnp.any(new_labels != labels)
 
-    labels, _ = jax.lax.while_loop(
-        lambda s: s[1], body, (init_labels, jnp.bool_(True))
-    )
+    labels, _ = jax.lax.while_loop(lambda s: s[1], body, (init_labels, jnp.bool_(True)))
     return jnp.where(occupied, color * (labels + 1), jnp.int32(0))
 
 
@@ -114,7 +114,7 @@ def _pseudo_stats(
     c = jnp.zeros((n, n), dtype=jnp.int32)
     s = jnp.zeros((n, n), dtype=jnp.int32)
     q = jnp.zeros((n, n), dtype=jnp.int32)
-    for (di, dj) in _DIRS:
+    for di, dj in _DIRS:
         nbr_empty = _shift(empty, di, dj, fill=False).astype(jnp.int32)
         nbr_idx = _shift(flat_idx, di, dj, fill=jnp.int32(0))
         c += nbr_empty
@@ -172,7 +172,7 @@ def load_checkpoint(ckpt_path):
         "opt_state": opt_state,
         "iteration": iteration,
         "frames": frames,
-        "hours": hours
+        "hours": hours,
     }
 
 
@@ -185,6 +185,7 @@ def forward_fn(x, num_actions, cfg):
     )
     policy_out, value_out = net(x, is_training=False, test_local_stats=False)
     return policy_out, value_out
+
 
 def level_update_linear(level: ScalarLike, t: IntLike, final_t: IntLike) -> ScalarLike:
     return t / final_t
@@ -215,7 +216,7 @@ class ContinualGo(PyTreeNode):
             k=k,
             opponent_model=ckpt_data["model"],
             az_config=ckpt_data["config"],
-            total_steps=total_steps
+            total_steps=total_steps,
         )
 
     @classmethod
@@ -244,7 +245,9 @@ class ContinualGo(PyTreeNode):
 
     def step(self, key, state, action: IntLike) -> tuple[State, ScalarLike]:
         # step function used for planning
-        def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State):
+        def recurrent_fn(
+            model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State
+        ):
             del rng_key
             model_params, model_state = model
 
@@ -254,7 +257,11 @@ class ContinualGo(PyTreeNode):
             obs = (state.turn[:, None, None] * state.board / self.k)[..., None]
 
             (logits, value), _ = forward.apply(
-                model_params, model_state, obs, num_actions=self.num_actions, cfg=self.az_config
+                model_params,
+                model_state,
+                obs,
+                num_actions=self.num_actions,
+                cfg=self.az_config,
             )
 
             # full legal-action mask: empty + non-suicide + not-ko
@@ -283,14 +290,20 @@ class ContinualGo(PyTreeNode):
         model_params, model_state = self.opponent_model
 
         (logits, value), _ = forward.apply(
-            model_params, model_state, observation, num_actions=self.num_actions, cfg=self.az_config
+            model_params,
+            model_state,
+            observation,
+            num_actions=self.num_actions,
+            cfg=self.az_config,
         )
 
         legal_actions = self.legal_actions(state)
         invalid_actions = (~legal_actions).reshape(1, self.num_actions)
 
         batched_state = jax.tree_util.tree_map(lambda x: jnp.expand_dims(x, 0), state)
-        root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=batched_state)
+        root = mctx.RootFnOutput(
+            prior_logits=logits, value=value, embedding=batched_state
+        )
 
         key_mctx, key_sample, key_noise = jax.random.split(key, 3)
         policy_output = mctx.gumbel_muzero_policy(
@@ -302,19 +315,26 @@ class ContinualGo(PyTreeNode):
             invalid_actions=invalid_actions,
             qtransform=mctx.qtransform_completed_by_mix_value,
             gumbel_scale=1.0,
-            max_depth=(self.az_config.num_simulations * state.skill_level).astype(jnp.int32),
+            max_depth=(self.az_config.num_simulations * state.skill_level).astype(
+                jnp.int32
+            ),
         )
 
         noise = jax.random.uniform(key_noise, (self.num_actions,)) * (~invalid_actions)
         noise /= noise.sum()
-        weights = state.skill_level * policy_output.action_weights + (1 - state.skill_level) * noise
+        weights = (
+            state.skill_level * policy_output.action_weights
+            + (1 - state.skill_level) * noise
+        )
         action = jax.random.categorical(key_sample, weights)
 
         # next_state, reward_az = self.step_turn(state, policy_output.action[0])
         next_state, reward_az = self.step_turn(state, action)
 
         next_step = next_state.num_step + 1
-        next_level = level_update_linear(next_state.skill_level, next_step, self.total_steps)
+        next_level = level_update_linear(
+            next_state.skill_level, next_step, self.total_steps
+        )
         next_state = next_state.replace(
             num_step=next_step,
             skill_level=next_level,
@@ -383,9 +403,7 @@ class ContinualGo(PyTreeNode):
         single_capture_idx = jnp.argmax(captured_flat).astype(jnp.int32)
         single_capture = captured_flat.sum() == 1
 
-        placed_in_atari = (ids[placed_ix] ** 2) == (
-            iqs[placed_ix] * nps[placed_ix]
-        )
+        placed_in_atari = (ids[placed_ix] ** 2) == (iqs[placed_ix] * nps[placed_ix])
         placed_is_singleton = (chain_id == placed_id).sum() == 1
 
         new_ko = jnp.where(
@@ -465,13 +483,13 @@ class ContinualGo(PyTreeNode):
 
         # Cauchy-Schwarz: a chain is in atari iff all its pseudo-libs point at the
         # same empty cell, i.e. idx_sum^2 == idx_squared_sum * num_pseudo.
-        in_atari_per_chain = (state.idx_sum ** 2) == (
+        in_atari_per_chain = (state.idx_sum**2) == (
             state.idx_squared_sum * state.num_pseudo
         )
         cell_in_atari = jnp.where(is_empty, False, in_atari_per_chain[chain_ix])
 
-        has_lib = (state.chain_id * my_sign > 0) & ~cell_in_atari       # mine, >=2 libs
-        can_kill = (state.chain_id * (-my_sign) > 0) & cell_in_atari    # opp in atari
+        has_lib = (state.chain_id * my_sign > 0) & ~cell_in_atari  # mine, >=2 libs
+        can_kill = (state.chain_id * (-my_sign) > 0) & cell_in_atari  # opp in atari
 
         e_flat = is_empty.reshape(-1)
         k_flat = can_kill.reshape(-1)

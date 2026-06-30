@@ -9,14 +9,18 @@ from pydantic import BaseModel
 import mctx
 from continual_go import ContinualGo, State
 from continual_go.render import plot_board
-from config import Config
-from network import AZNet
-from test import recurrent_fn, forward_fn
+
+# from continual_go.alpha_zero.config import Config
+from continual_go.alpha_zero.network import AZNet
 
 
 class Args(BaseModel):
-    load_path_a: str = "checkpoints/continual_go_trained_az_with_legal_actions/000025.ckpt"
-    load_path_b: str = "checkpoints/continual_go_trained_az_with_legal_actions/000400.ckpt"
+    load_path_a: str = (
+        "checkpoints/continual_go_trained_az_with_legal_actions/000025.ckpt"
+    )
+    load_path_b: str = (
+        "checkpoints/continual_go_trained_az_with_legal_actions/000400.ckpt"
+    )
     video_path: str = "game.gif"
 
     seed: int = 42
@@ -37,22 +41,68 @@ class Args(BaseModel):
 
 
 config = tyro.cli(Args)
-env = ContinualGo(size=config.board_size, k=config.max_stones)
+env = ContinualGo.create_selfplay(size=config.board_size, k=config.max_stones)
+
+
+def forward_fn(x, is_eval=False):
+    net = AZNet(
+        num_actions=env.num_actions,
+        num_channels=config.num_channels,
+        num_blocks=config.num_layers,
+        resnet_v2=config.resnet_v2,
+    )
+    policy_out, value_out = net(x, is_training=not is_eval, test_local_stats=False)
+    return policy_out, value_out
 
 
 forward = hk.without_apply_rng(hk.transform_with_state(forward_fn))
 
 
+def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State):
+    # model: params
+    # state: embedding (batched)
+    del rng_key
+    model_params, model_state = model
+
+    state, reward = jax.vmap(env.step_turn)(state, action)
+
+    # (batch, H, W, 1)
+    obs = (state.turn[:, None, None] * state.board / env.k)[..., None]
+
+    (logits, value), _ = forward.apply(model_params, model_state, obs, is_eval=True)
+
+    # legal-action mask: opponent can play any empty cell
+    occupancy_free = (state.board == 0).reshape(logits.shape)
+    logits = jnp.where(occupancy_free, logits, jnp.finfo(logits.dtype).min)
+
+    # normalize reward to match the tanh-bounded value head
+    # TODO(Esraa): not sure about this normalization, could remove the tanh from the value head instead
+    reward = reward.astype(value.dtype) / env.k
+
+    discount = -config.gamma * jnp.ones_like(value)
+
+    recurrent_fn_output = mctx.RecurrentFnOutput(
+        reward=reward,
+        discount=discount,
+        prior_logits=logits,
+        value=value,
+    )
+    return recurrent_fn_output, state
+
 
 @jax.jit
-def play(model_a, model_b, state: State, rng_key: jnp.ndarray, skill_level: float = 1.0):
+def play(
+    model_a, model_b, state: State, rng_key: jnp.ndarray, skill_level: float = 1.0
+):
     state = jax.tree.map(lambda x: x[None], state)
 
     def step_fn(state, key):
         # Model A's turn
         model_a_params, model_a_state = model_a
         obs_a = (state.turn[:, None, None] * state.board / env.k)[..., None]
-        (logits_a, value_a), _ = forward.apply(model_a_params, model_a_state, obs_a, is_eval=True)
+        (logits_a, value_a), _ = forward.apply(
+            model_a_params, model_a_state, obs_a, is_eval=True
+        )
         legal_a = jax.vmap(env.legal_actions)(state)
         root_a = mctx.RootFnOutput(
             prior_logits=logits_a, value=value_a, embedding=state
@@ -68,12 +118,14 @@ def play(model_a, model_b, state: State, rng_key: jnp.ndarray, skill_level: floa
             qtransform=mctx.qtransform_completed_by_mix_value,
             gumbel_scale=1.0,
         )
-        state_a, reward_a = jax.vmap(env.step)(state, policy_a.action)
+        state_a, reward_a = jax.vmap(env.step_turn)(state, policy_a.action)
 
         # Model B's turn
         model_b_params, model_b_state = model_b
         obs_b = (state_a.turn[:, None, None] * state_a.board / env.k)[..., None]
-        (logits_b, value_b), _ = forward.apply(model_b_params, model_b_state, obs_b, is_eval=True)
+        (logits_b, value_b), _ = forward.apply(
+            model_b_params, model_b_state, obs_b, is_eval=True
+        )
         legal_b = jax.vmap(env.legal_actions)(state_a)
         root_b = mctx.RootFnOutput(
             prior_logits=logits_b, value=value_b, embedding=state_a
@@ -90,12 +142,17 @@ def play(model_a, model_b, state: State, rng_key: jnp.ndarray, skill_level: floa
             max_depth=(config.num_simulations * skill_level).astype(jnp.int32),
             gumbel_scale=1.0,
         )
-        noise = jax.random.uniform(key_noise, (self.num_actions,)) * legal_b.reshape(logits_b.shape)
-        noise /= noise.sum()
-        weights = state.skill_level * policy_b.action_weights + (1 - state.skill_level) * noise
-        policy_b_action = jax.random.categorical(key_sample, weights)
 
-        state_b, reward_b = jax.vmap(env.step)(state_a, policy_b_action)
+        # noise = jax.random.uniform(key_noise, (env.num_actions,))
+        noise = jax.random.dirichlet(key_noise, 1.0, (env.num_actions,))
+        noise *= legal_b.reshape(logits_b.shape)
+        noise /= noise.sum()
+        weights = skill_level * policy_b.action_weights + (1 - skill_level) * noise
+
+        # policy_b_action = jax.random.categorical(key_sample, weights)
+        policy_b_action = jnp.expand_dims(jnp.argmax(weights), 0)
+
+        state_b, reward_b = jax.vmap(env.step_turn)(state_a, policy_b_action)
 
         return state_b, (state_a.board, state_b.board, reward_a, reward_b)
 
@@ -122,21 +179,23 @@ if __name__ == "__main__":
     model_b = load_checkpoint(args.load_path_b)["model"]
 
     state = env.init()
-    board_a, board_b, reward_a, reward_b = play(model_a, model_b, state, key, args.skill_level)
+    board_a, board_b, reward_a, reward_b = play(
+        model_a, model_b, state, key, args.skill_level
+    )
 
     label_a = args.load_path_a.split("/")[-1]
     label_b = args.load_path_b.split("/")[-1]
 
     font_size = 16
     fig, ax = plt.subplots()
-    plt.rcParams.update({'font.size': font_size})
-    ax.plot(jnp.cumsum(reward_b), label="AlphaZero B", color='#2980b9')
-    ax.plot(jnp.cumsum(reward_a), label="AlphaZero A", color='#e74c3c')
+    plt.rcParams.update({"font.size": font_size})
+    ax.plot(jnp.cumsum(reward_b), label="AlphaZero B", color="#2980b9")
+    ax.plot(jnp.cumsum(reward_a), label="AlphaZero A", color="#e74c3c")
     ax.set_ylabel("Cumulative reward", fontsize=font_size)
     ax.set_xlabel("Steps", fontsize=font_size)
-    ax.legend(fontsize=font_size,frameon=False)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+    ax.legend(fontsize=font_size, frameon=False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     plt.tight_layout()
     plt.savefig("reward_curve.png", dpi=500)
     plt.show()
@@ -147,8 +206,8 @@ if __name__ == "__main__":
     boards_b = jnp.squeeze(board_b, axis=1)
     frames = []
     for t in range(boards_a.shape[0]):
-        frames.append((boards_a[t], f"Step {t+1} — A ({label_a}) just played"))
-        frames.append((boards_b[t], f"Step {t+1} — B ({label_b}) just played"))
+        frames.append((boards_a[t], f"Step {t + 1} — A ({label_a}) just played"))
+        frames.append((boards_b[t], f"Step {t + 1} — B ({label_b}) just played"))
 
     fig, ax = plt.subplots(figsize=(6, 6))
 

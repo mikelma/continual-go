@@ -10,8 +10,8 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 import mctx
 from continual_go import ContinualGo, State
-from config import Config
-from network import AZNet
+from continual_go.alpha_zero.config import Config
+from continual_go.alpha_zero.network import AZNet
 
 
 class Args(BaseModel):
@@ -34,7 +34,7 @@ class Args(BaseModel):
 
 
 config = tyro.cli(Args)
-env = ContinualGo(size=config.board_size, k=config.max_stones)
+env = ContinualGo.create_selfplay(size=config.board_size, k=config.max_stones)
 
 
 def forward_fn(x, is_eval=False):
@@ -50,25 +50,26 @@ def forward_fn(x, is_eval=False):
 
 forward = hk.without_apply_rng(hk.transform_with_state(forward_fn))
 
+
 def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State):
     # model: params
     # state: embedding (batched)
     del rng_key
     model_params, model_state = model
 
-    state, reward = jax.vmap(env.step)(state, action)
+    state, reward = jax.vmap(env.step_turn)(state, action)
 
     # (batch, H, W, 1)
     obs = (state.turn[:, None, None] * state.board / env.k)[..., None]
 
     (logits, value), _ = forward.apply(model_params, model_state, obs, is_eval=True)
 
-    #legal-action mask: opponent can play any empty cell
+    # legal-action mask: opponent can play any empty cell
     occupancy_free = (state.board == 0).reshape(logits.shape)
     logits = jnp.where(occupancy_free, logits, jnp.finfo(logits.dtype).min)
 
     # normalize reward to match the tanh-bounded value head
-    #TODO(Esraa): not sure about this normalization, could remove the tanh from the value head instead
+    # TODO(Esraa): not sure about this normalization, could remove the tanh from the value head instead
     reward = reward.astype(value.dtype) / env.k
 
     discount = -config.gamma * jnp.ones_like(value)
@@ -121,7 +122,7 @@ def play(model, state: State, rng_key: jnp.ndarray):
             qtransform=mctx.qtransform_completed_by_mix_value,
             gumbel_scale=1.0,
         )
-        state_az, reward_az = jax.vmap(env.step)(state, policy_output.action)
+        state_az, reward_az = jax.vmap(env.step_turn)(state, policy_output.action)
 
         # Run a random agent as the opponent
         key, key_act = jax.random.split(key)
@@ -129,7 +130,7 @@ def play(model, state: State, rng_key: jnp.ndarray):
         keys_act = jax.random.split(key_act, mask.shape[0])
         action = jax.vmap(act_randomly)(keys_act, mask)
 
-        state_op, reward_op = jax.vmap(env.step)(state_az, action)
+        state_op, reward_op = jax.vmap(env.step_turn)(state_az, action)
 
         return state_op, (state_az.board, state_op.board, reward_az, reward_op)
 
@@ -163,8 +164,9 @@ def load_checkpoint(ckpt_path):
         "opt_state": opt_state,
         "iteration": iteration,
         "frames": frames,
-        "hours": hours
+        "hours": hours,
     }
+
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -179,14 +181,14 @@ if __name__ == "__main__":
 
     font_size = 16
     fig, ax = plt.subplots()
-    plt.rcParams.update({'font.size': font_size})
-    ax.plot(jnp.cumsum(reward_az), label="AlphaZero@6M frames", color='#2980b9')
-    ax.plot(jnp.cumsum(reward_op), label="Random", color='#e74c3c')
+    plt.rcParams.update({"font.size": font_size})
+    ax.plot(jnp.cumsum(reward_az), label="AlphaZero@6M frames", color="#2980b9")
+    ax.plot(jnp.cumsum(reward_op), label="Random", color="#e74c3c")
     ax.set_ylabel("Cumulative reward", fontsize=font_size)
     ax.set_xlabel("Steps", fontsize=font_size)
-    ax.legend(fontsize=font_size,frameon=False)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+    ax.legend(fontsize=font_size, frameon=False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     plt.tight_layout()
     plt.savefig("reward_curve.png", dpi=500)
     plt.show()

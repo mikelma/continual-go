@@ -5,10 +5,12 @@ description = "A big world environment for continual reinforcement learning"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
+    "dm-haiku>=0.0.16",
     "flax>=0.12.6",
     "jax>=0.9.2",
     "jaxtyping>=0.3.9",
     "matplotlib>=3.10.8",
+    "mctx>=0.0.6",
     "numpy>=2.4.3",
 ]
 
