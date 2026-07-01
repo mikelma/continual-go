@@ -8,6 +8,7 @@ import jax.numpy as jnp
 from pydantic import BaseModel
 import mctx
 import uuid
+import os
 from continual_go import ContinualGo, State
 from continual_go.render import plot_board
 
@@ -44,6 +45,7 @@ class Args(BaseModel):
     record_gif: bool = False
     show_plot: bool = False
     save_csv: bool = False
+    csv_dir: str = "./"
 
 
 config = tyro.cli(Args)
@@ -200,6 +202,7 @@ if __name__ == "__main__":
 
     if args.save_csv:
         fname = f"eval_checkpoints_{uuid.uuid4()}.csv"
+        fname = os.path.join(args.csv_dir, fname)
         ret_A = jnp.cumsum(reward_a)[-1]
         ret_B = jnp.cumsum(reward_b)[-1]
 
