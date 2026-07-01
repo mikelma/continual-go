@@ -7,6 +7,7 @@ import pickle
 import jax.numpy as jnp
 from pydantic import BaseModel
 import mctx
+import uuid
 from continual_go import ContinualGo, State
 from continual_go.render import plot_board
 
@@ -26,6 +27,7 @@ class Args(BaseModel):
     seed: int = 42
 
     skill_level: float = 1.0
+    dirichlet_alpha: float = 1.0
 
     board_size: int = 9
     max_stones: int = 32
@@ -38,6 +40,10 @@ class Args(BaseModel):
 
     num_simulations: int = 32
     max_num_steps: int = 256
+
+    record_gif: bool = False
+    show_plot: bool = False
+    save_csv: bool = False
 
 
 config = tyro.cli(Args)
@@ -92,7 +98,12 @@ def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State)
 
 @jax.jit
 def play(
-    model_a, model_b, state: State, rng_key: jnp.ndarray, skill_level: float = 1.0
+    model_a,
+    model_b,
+    state: State,
+    rng_key: jnp.ndarray,
+    skill_level: float = 1.0,
+    dirichlet_alpha: float = 1.0,
 ):
     state = jax.tree.map(lambda x: x[None], state)
 
@@ -144,7 +155,8 @@ def play(
         )
 
         # noise = jax.random.uniform(key_noise, (env.num_actions,))
-        noise = jax.random.dirichlet(key_noise, 1.0, (env.num_actions,))
+        alphas = jnp.full((env.num_actions,), dirichlet_alpha)
+        noise = jax.random.dirichlet(key_noise, alphas)
         noise *= legal_b.reshape(logits_b.shape)
         noise /= noise.sum()
         weights = skill_level * policy_b.action_weights + (1 - skill_level) * noise
@@ -180,50 +192,65 @@ if __name__ == "__main__":
 
     state = env.init()
     board_a, board_b, reward_a, reward_b = play(
-        model_a, model_b, state, key, args.skill_level
+        model_a, model_b, state, key, args.skill_level, args.dirichlet_alpha
     )
 
     label_a = args.load_path_a.split("/")[-1]
     label_b = args.load_path_b.split("/")[-1]
 
-    font_size = 16
-    fig, ax = plt.subplots()
-    plt.rcParams.update({"font.size": font_size})
-    ax.plot(jnp.cumsum(reward_b), label="AlphaZero B", color="#2980b9")
-    ax.plot(jnp.cumsum(reward_a), label="AlphaZero A", color="#e74c3c")
-    ax.set_ylabel("Cumulative reward", fontsize=font_size)
-    ax.set_xlabel("Steps", fontsize=font_size)
-    ax.legend(fontsize=font_size, frameon=False)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    plt.tight_layout()
-    plt.savefig("reward_curve.png", dpi=500)
-    plt.show()
+    if args.save_csv:
+        fname = f"eval_checkpoints_{uuid.uuid4()}.csv"
+        ret_A = jnp.cumsum(reward_a)[-1]
+        ret_B = jnp.cumsum(reward_b)[-1]
 
-    # interleave A and B half-steps: board_a[t] then board_b[t]
-    # boards have shape (steps, 1, H, W) — squeeze batch dim
-    boards_a = jnp.squeeze(board_a, axis=1)  # (steps, H, W)
-    boards_b = jnp.squeeze(board_b, axis=1)
-    frames = []
-    for t in range(boards_a.shape[0]):
-        frames.append((boards_a[t], f"Step {t + 1} — A ({label_a}) just played"))
-        frames.append((boards_b[t], f"Step {t + 1} — B ({label_b}) just played"))
+        with open(fname, "w") as f:
+            f.write(
+                "seed,board_size,k,num_steps,skill_level,dirichlet_alpha,model_A,model_B,return_A,return_B\n"
+            )
+            f.write(
+                f"{args.seed},{args.board_size},{args.max_stones},{args.max_num_steps},{args.skill_level},{args.dirichlet_alpha},{args.load_path_a},{args.load_path_b},{ret_A},{ret_B}\n"
+            )
 
-    fig, ax = plt.subplots(figsize=(6, 6))
+    if args.show_plot:
+        font_size = 16
+        fig, ax = plt.subplots()
+        plt.rcParams.update({"font.size": font_size})
+        ax.plot(jnp.cumsum(reward_b), label="AlphaZero B", color="#2980b9")
+        ax.plot(jnp.cumsum(reward_a), label="AlphaZero A", color="#e74c3c")
+        ax.set_ylabel("Cumulative reward", fontsize=font_size)
+        ax.set_xlabel("Steps", fontsize=font_size)
+        ax.legend(fontsize=font_size, frameon=False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        plt.tight_layout()
+        plt.savefig("reward_curve.png", dpi=500)
+        plt.show()
 
-    def animate(i):
-        board, title = frames[i]
-        ax.clear()
-        plot_board(board, ax=ax, show=False)
-        ax.set_title(title, fontsize=10)
+    if args.record_gif:
+        # interleave A and B half-steps: board_a[t] then board_b[t]
+        # boards have shape (steps, 1, H, W) — squeeze batch dim
+        boards_a = jnp.squeeze(board_a, axis=1)  # (steps, H, W)
+        boards_b = jnp.squeeze(board_b, axis=1)
+        frames = []
+        for t in range(boards_a.shape[0]):
+            frames.append((boards_a[t], f"Step {t + 1} — A ({label_a}) just played"))
+            frames.append((boards_b[t], f"Step {t + 1} — B ({label_b}) just played"))
 
-    ani = animation.FuncAnimation(fig, animate, frames=len(frames), interval=300)
+        fig, ax = plt.subplots(figsize=(6, 6))
 
-    if args.video_path.endswith(".mp4"):
-        writer = animation.FFMpegWriter(fps=3)
-    else:
-        writer = animation.PillowWriter(fps=3)
+        def animate(i):
+            board, title = frames[i]
+            ax.clear()
+            plot_board(board, ax=ax, show=False)
+            ax.set_title(title, fontsize=10)
 
-    ani.save(args.video_path, writer=writer)
-    print(f"Saved video to {args.video_path}")
-    plt.close(fig)
+        ani = animation.FuncAnimation(fig, animate, frames=len(frames), interval=300)
+
+        if args.video_path.endswith(".mp4"):
+            writer = animation.FFMpegWriter(fps=3)
+        else:
+            writer = animation.PillowWriter(fps=3)
+
+        ani.save(args.video_path, writer=writer)
+        print(f"Saved video to {args.video_path}")
+        plt.close(fig)
