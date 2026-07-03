@@ -98,6 +98,20 @@ def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State)
     return recurrent_fn_output, state
 
 
+def skill_sample_action(
+    key: jnp.ndarray, p: jnp.ndarray, num_actions: int, skill_level: float
+):
+    ordering = jnp.argsort(p)
+    ranking = jnp.empty_like(p)
+    ranking = ranking.at[ordering].set(jnp.arange(num_actions))
+
+    weights = jnp.exp(-skill_level * ranking)
+    probs = weights / weights.sum()
+
+    action = jax.random.categorical(key, probs)
+    return action
+
+
 @jax.jit
 def play(
     model_a,
@@ -131,6 +145,7 @@ def play(
             qtransform=mctx.qtransform_completed_by_mix_value,
             gumbel_scale=1.0,
         )
+
         state_a, reward_a = jax.vmap(env.step_turn)(state, policy_a.action)
 
         # Model B's turn
@@ -156,15 +171,18 @@ def play(
             gumbel_scale=1.0,
         )
 
-        # noise = jax.random.uniform(key_noise, (env.num_actions,))
-        alphas = jnp.full((env.num_actions,), dirichlet_alpha)
-        noise = jax.random.dirichlet(key_noise, alphas)
-        noise *= legal_b.reshape(logits_b.shape)
-        noise /= noise.sum()
-        weights = skill_level * policy_b.action_weights + (1 - skill_level) * noise
+        # # noise = jax.random.uniform(key_noise, (env.num_actions,))
+        # alphas = jnp.full((env.num_actions,), dirichlet_alpha)
+        # noise = jax.random.dirichlet(key_noise, alphas)
+        # noise *= legal_b.reshape(logits_b.shape)
+        # noise /= noise.sum()
+        # weights = skill_level * policy_b.action_weights + (1 - skill_level) * noise
 
         # policy_b_action = jax.random.categorical(key_sample, weights)
-        policy_b_action = jnp.expand_dims(jnp.argmax(weights), 0)
+        # policy_b_action = jnp.expand_dims(jnp.argmax(weights), 0)
+        policy_b_action = skill_sample_action(
+            key_sample, policy_b.action_weights, env.num_actions, skill_level
+        )
 
         state_b, reward_b = jax.vmap(env.step_turn)(state_a, policy_b_action)
 
