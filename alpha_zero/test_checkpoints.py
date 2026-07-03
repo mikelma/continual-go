@@ -101,15 +101,18 @@ def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State)
 def skill_sample_action(
     key: jnp.ndarray, p: jnp.ndarray, num_actions: int, skill_level: float
 ):
+    p = p[0]
     ordering = jnp.argsort(p)
     ranking = jnp.empty_like(p)
     ranking = ranking.at[ordering].set(jnp.arange(num_actions))
 
-    weights = jnp.exp(-skill_level * ranking)
-    probs = weights / weights.sum()
+    logits = skill_level * ranking
 
-    action = jax.random.categorical(key, probs)
-    return action
+    action = jax.random.categorical(key, logits)
+    jax.debug.print(
+        "max={m}, min={n}, action={a}", m=jnp.argmax(p), n=jnp.argmin(p), a=action
+    )
+    return jnp.expand_dims(action, 0)
 
 
 @jax.jit
