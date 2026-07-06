@@ -235,7 +235,7 @@ class ContinualGo(PyTreeNode):
             board=jnp.zeros((n, n), dtype=jnp.int32),
             turn=jnp.int32(-1),
             chain_id=jnp.zeros((n, n), dtype=jnp.int32),
-            ko=jnp.int32(-1),
+            ko=jnp.expand_dims(jnp.int32(-1), 0),
             num_pseudo=jnp.zeros(n * n, dtype=jnp.int32),
             idx_sum=jnp.zeros(n * n, dtype=jnp.int32),
             idx_squared_sum=jnp.zeros(n * n, dtype=jnp.int32),
