@@ -109,9 +109,6 @@ def skill_sample_action(
     logits = skill_level * ranking
 
     action = jax.random.categorical(key, logits)
-    jax.debug.print(
-        "max={m}, min={n}, action={a}", m=jnp.argmax(p), n=jnp.argmin(p), a=action
-    )
     return jnp.expand_dims(action, 0)
 
 

@@ -19,4 +19,5 @@ dependencies = [
 members = [
     "alpha_zero",
     ".",
+    "plots",
 ]
