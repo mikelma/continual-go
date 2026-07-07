@@ -9,6 +9,8 @@ from pydantic import BaseModel
 import mctx
 import uuid
 import os
+from functools import partial
+from typing import Literal
 from continual_go import ContinualGo, State
 from continual_go.render import plot_board
 
@@ -41,6 +43,10 @@ class Args(BaseModel):
 
     num_simulations: int = 32
     max_num_steps: int = 256
+
+    sampling_method: Literal[
+        "dirichlet-argmax", "dirichlet-sample", "ranking", "epsilon"
+    ] = "dirichlet-argmax"
 
     record_gif: bool = False
     show_plot: bool = False
@@ -98,8 +104,8 @@ def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State)
     return recurrent_fn_output, state
 
 
-def skill_sample_action(
-    key: jnp.ndarray, p: jnp.ndarray, num_actions: int, skill_level: float
+def ranking_based_sampling(
+    key: jnp.ndarray, p: jax.Array, num_actions: int, skill_level: float
 ):
     p = p[0]
     ordering = jnp.argsort(p)
@@ -109,10 +115,26 @@ def skill_sample_action(
     logits = skill_level * ranking
 
     action = jax.random.categorical(key, logits)
+    # return jnp.expand_dims(action, 0)
     return jnp.expand_dims(action, 0)
 
 
-@jax.jit
+def epsilon_sampling(
+    key: jnp.ndarray,
+    p: jax.Array,
+    original_action: jax.Array,
+    num_actions: int,
+    skill_level: float,
+):
+    key_sample, key_choice = jax.random.split(key)
+    return jax.lax.select(
+        jax.random.uniform(key_sample) >= skill_level,
+        jax.random.randint(key_sample, (), minval=0, maxval=num_actions),
+        jnp.squeeze(original_action),
+    )
+
+
+@partial(jax.jit, static_argnames="sampling_method")
 def play(
     model_a,
     model_b,
@@ -120,6 +142,9 @@ def play(
     rng_key: jnp.ndarray,
     skill_level: float = 1.0,
     dirichlet_alpha: float = 1.0,
+    sampling_method: Literal[
+        "dirichlet-argmax", "dirichlet-sample", "ranking", "epsilon"
+    ] = "dirichlet-argmax",
 ):
     state = jax.tree.map(lambda x: x[None], state)
 
@@ -146,7 +171,14 @@ def play(
             gumbel_scale=1.0,
         )
 
-        state_a, reward_a = jax.vmap(env.step_turn)(state, policy_a.action)
+        key, sample_key = jax.random.split(key)
+        if sampling_method == "dirichlet-sample":
+            policy_a_action = jax.random.categorical(
+                sample_key, policy_a.action_weights
+            )
+        else:
+            policy_a_action = policy_a.action
+        state_a, reward_a = jax.vmap(env.step_turn)(state, policy_a_action)
 
         # Model B's turn
         model_b_params, model_b_state = model_b
@@ -171,19 +203,40 @@ def play(
             gumbel_scale=1.0,
         )
 
-        # # noise = jax.random.uniform(key_noise, (env.num_actions,))
-        # alphas = jnp.full((env.num_actions,), dirichlet_alpha)
-        # noise = jax.random.dirichlet(key_noise, alphas)
-        # noise *= legal_b.reshape(logits_b.shape)
-        # noise /= noise.sum()
-        # weights = skill_level * policy_b.action_weights + (1 - skill_level) * noise
+        # Decide which action to take based on the policy B output and the sampling method
+        if (
+            sampling_method == "dirichlet-argmax"
+            or sampling_method == "dirichlet-sample"
+        ):
+            alphas = jnp.full((env.num_actions,), dirichlet_alpha)
+            noise = jax.random.dirichlet(key_noise, alphas)
+            noise *= legal_b.reshape(logits_b.shape)
+            noise /= noise.sum()
+            weights = skill_level * policy_b.action_weights + (1 - skill_level) * noise
 
-        # policy_b_action = jax.random.categorical(key_sample, weights)
-        # policy_b_action = jnp.expand_dims(jnp.argmax(weights), 0)
-        policy_b_action = skill_sample_action(
-            key_sample, policy_b.action_weights, env.num_actions, skill_level
-        )
+            if sampling_method == "dirichlet-sample":
+                policy_b_action = jax.random.categorical(key_sample, weights)
+            else:
+                policy_b_action = jnp.argmax(weights)
 
+        elif sampling_method == "ranking":
+            policy_b_action = ranking_based_sampling(
+                key_sample, policy_b.action_weights, env.num_actions, skill_level
+            )
+
+        elif sampling_method == "epsilon":
+            policy_b_action = epsilon_sampling(
+                key_sample,
+                policy_b.action_weights,
+                policy_b.action,
+                env.num_actions,
+                skill_level,
+            )
+
+        else:
+            raise Exception(f"Invalid sampling method '{sampling_method}'")
+
+        policy_b_action = jnp.expand_dims(policy_b_action, 0)
         state_b, reward_b = jax.vmap(env.step_turn)(state_a, policy_b_action)
 
         return state_b, (state_a.board, state_b.board, reward_a, reward_b)
@@ -212,7 +265,13 @@ if __name__ == "__main__":
 
     state = env.init()
     board_a, board_b, reward_a, reward_b = play(
-        model_a, model_b, state, key, args.skill_level, args.dirichlet_alpha
+        model_a,
+        model_b,
+        state,
+        key,
+        args.skill_level,
+        args.dirichlet_alpha,
+        sampling_method=args.sampling_method,
     )
 
     label_a = args.load_path_a.split("/")[-1]
