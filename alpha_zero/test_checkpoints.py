@@ -285,10 +285,10 @@ if __name__ == "__main__":
 
         with open(fname, "w") as f:
             f.write(
-                "seed,board_size,k,num_steps,skill_level,dirichlet_alpha,model_A,model_B,return_A,return_B\n"
+                "seed,sampling_method,board_size,k,num_steps,skill_level,dirichlet_alpha,model_A,model_B,return_A,return_B\n"
             )
             f.write(
-                f"{args.seed},{args.board_size},{args.max_stones},{args.max_num_steps},{args.skill_level},{args.dirichlet_alpha},{args.load_path_a},{args.load_path_b},{ret_A},{ret_B}\n"
+                f"{args.seed},{args.sampling_method},{args.board_size},{args.max_stones},{args.max_num_steps},{args.skill_level},{args.dirichlet_alpha},{args.load_path_a},{args.load_path_b},{ret_A},{ret_B}\n"
             )
 
     if args.show_plot:
