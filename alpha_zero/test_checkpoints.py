@@ -10,12 +10,21 @@ import mctx
 import uuid
 import os
 from functools import partial
-from typing import Literal
+from typing import Literal, TypeAlias
 from continual_go import ContinualGo, State
 from continual_go.render import plot_board
 
 # from continual_go.alpha_zero.config import Config
 from continual_go.alpha_zero.network import AZNet
+
+
+SamplingMethod: TypeAlias = Literal[
+    "dirichlet-argmax",
+    "dirichlet-sample",
+    "ranking",
+    "ranking-prior",
+    "epsilon",
+]
 
 
 class Args(BaseModel):
@@ -44,9 +53,7 @@ class Args(BaseModel):
     num_simulations: int = 32
     max_num_steps: int = 256
 
-    sampling_method: Literal[
-        "dirichlet-argmax", "dirichlet-sample", "ranking", "epsilon"
-    ] = "dirichlet-argmax"
+    sampling_method: SamplingMethod = "dirichlet-argmax"
 
     record_gif: bool = False
     show_plot: bool = False
@@ -105,17 +112,30 @@ def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State)
 
 
 def ranking_based_sampling(
-    key: jnp.ndarray, p: jax.Array, num_actions: int, skill_level: float
+    key: jax.Array,
+    prior: jax.Array,
+    num_actions: int,
+    skill_level: float,
+    legal_mask: jax.Array,
+    use_prior: bool = False,
 ):
-    p = p[0]
-    ordering = jnp.argsort(p)
-    ranking = jnp.empty_like(p)
+    ordering = jnp.argsort(prior)
+    ranking = jnp.empty_like(prior)
     ranking = ranking.at[ordering].set(jnp.arange(num_actions))
 
     logits = skill_level * ranking
 
-    action = jax.random.categorical(key, logits)
-    # return jnp.expand_dims(action, 0)
+    exp = jnp.exp(logits)
+    probs = exp / exp.sum()
+
+    if use_prior:
+        probs *= prior
+        probs /= probs.sum()
+
+    probs *= legal_mask
+    probs /= probs.sum() + 1e-8
+
+    action = jax.random.categorical(key, jnp.log(probs))
     return jnp.expand_dims(action, 0)
 
 
@@ -125,11 +145,17 @@ def epsilon_sampling(
     original_action: jax.Array,
     num_actions: int,
     skill_level: float,
+    legal_mask: jax.Array,
 ):
     key_sample, key_choice = jax.random.split(key)
+
+    # Sample a random but legal action
+    legal_logits = jnp.where(legal_mask, 0.0, -jnp.inf)
+    random_action = jax.random.categorical(key_sample, legal_logits)
+
     return jax.lax.select(
         jax.random.uniform(key_sample) >= skill_level,
-        jax.random.randint(key_sample, (), minval=0, maxval=num_actions),
+        random_action,
         jnp.squeeze(original_action),
     )
 
@@ -142,9 +168,7 @@ def play(
     rng_key: jnp.ndarray,
     skill_level: float = 1.0,
     dirichlet_alpha: float = 1.0,
-    sampling_method: Literal[
-        "dirichlet-argmax", "dirichlet-sample", "ranking", "epsilon"
-    ] = "dirichlet-argmax",
+    sampling_method: SamplingMethod = "dirichlet-argmax",
 ):
     state = jax.tree.map(lambda x: x[None], state)
 
@@ -219,18 +243,24 @@ def play(
             else:
                 policy_b_action = jnp.argmax(weights)
 
-        elif sampling_method == "ranking":
+        elif sampling_method == "ranking" or sampling_method == "ranking-prior":
             policy_b_action = ranking_based_sampling(
-                key_sample, policy_b.action_weights, env.num_actions, skill_level
+                key=key_sample,
+                prior=policy_b.action_weights[0],
+                num_actions=env.num_actions,
+                skill_level=skill_level,
+                legal_mask=legal_b.reshape(-1),
+                use_prior=sampling_method == "ranking-prior",
             )
 
         elif sampling_method == "epsilon":
             policy_b_action = epsilon_sampling(
-                key_sample,
-                policy_b.action_weights,
-                policy_b.action,
-                env.num_actions,
-                skill_level,
+                key=key_sample,
+                p=policy_b.action_weights,
+                original_action=policy_b.action,
+                num_actions=env.num_actions,
+                skill_level=skill_level,
+                legal_mask=legal_b.reshape(-1),
             )
 
         else:
