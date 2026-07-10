@@ -67,7 +67,7 @@ def ranking(
 
     r, p = sp.stats.pearsonr(df["return_A"], df["skill_level"])
 
-    plt.title("Ranking-based skill control")
+    # plt.title("Ranking-based skill control")
 
     if plot == "box":
         sns.boxplot(data=df, x="skill_level", y="return_A")
@@ -81,6 +81,53 @@ def ranking(
     ax.tick_params(axis="x", labelrotation=45)
     ax.set_ylabel("Opponent's return")
     plt.text(0.8, 0.8, "Pearson's r ={:.2f}".format(r), transform=ax.transAxes)
+
+    plt.show()
+
+
+@app.command
+def many(
+    data: str = "./data_skill_level.csv",
+    font_size: int = 17,
+    plot: Literal["line", "box"] = "box",
+):
+    df = pd.read_csv(data)
+
+    plt.rcParams.update({"font.size": font_size})
+
+    df["return_A"] = df["return_A"] - df["return_B"]
+
+    corrs = []
+    methods = df["sampling_method"].unique()
+    for method in methods:
+        sel = df[df["sampling_method"] == method]
+        r, p = sp.stats.pearsonr(sel["skill_level"], sel["return_A"])
+        corrs.append(r)
+        print(method)
+        if "ranking" in method:
+            df.loc[df["sampling_method"] == method, "skill_level"] /= df[
+                df["sampling_method"] == method
+            ]["skill_level"].max()
+
+    # plt.title("Ranking-based skill control")
+
+    if plot == "box":
+        sns.boxplot(data=df, x="skill_level", y="return_A", hue="sampling_method")
+    elif plot == "line":
+        sns.lineplot(
+            data=df, x="skill_level", y="return_A", errorbar="sd", hue="sampling_method"
+        )
+
+    ax = plt.gca()
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.set_xlabel("Skill level")
+    ax.tick_params(axis="x", labelrotation=45)
+    ax.set_ylabel("Opponent's return")
+    rstr = "Pearson's r:\n" + "\n".join(
+        [f"{m}: " + "{:.2f}".format(r) for m, r in zip(methods, corrs)]
+    )
+    plt.text(0.8, 0.8, rstr, transform=ax.transAxes)
 
     plt.show()
 
