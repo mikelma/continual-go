@@ -125,17 +125,13 @@ def ranking_based_sampling(
 
     logits = skill_level * ranking
 
-    exp = jnp.exp(logits)
-    probs = exp / exp.sum()
-
     if use_prior:
-        probs *= prior
-        probs /= probs.sum()
+        logits = logits + jnp.log(prior + 1e-8)
 
-    probs *= legal_mask
-    probs /= probs.sum() + 1e-8
+    logits = jnp.where(legal_mask, logits, -jnp.inf)
 
-    action = jax.random.categorical(key, jnp.log(probs))
+    action = jax.random.categorical(key, logits)
+
     return jnp.expand_dims(action, 0)
 
 
