@@ -24,6 +24,7 @@ SamplingMethod: TypeAlias = Literal[
     "ranking",
     "ranking-prior",
     "epsilon",
+    "temperature",
 ]
 
 
@@ -109,6 +110,16 @@ def recurrent_fn(model, rng_key: jnp.ndarray, action: jnp.ndarray, state: State)
         value=value,
     )
     return recurrent_fn_output, state
+
+
+def temperature_sampling(
+    key: jax.Array, prior: jax.Array, skill_level: float, legal_mask: jax.Array
+):
+    logits = jnp.log(prior + 1e-8)
+    scaled_logits = skill_level * logits
+    scaled_logits = jnp.where(legal_mask, scaled_logits, -jnp.inf)
+    action = jax.random.categorical(key, scaled_logits)
+    return jnp.expand_dims(action, 0)
 
 
 def ranking_based_sampling(
@@ -255,6 +266,14 @@ def play(
                 p=policy_b.action_weights,
                 original_action=policy_b.action,
                 num_actions=env.num_actions,
+                skill_level=skill_level,
+                legal_mask=legal_b.reshape(-1),
+            )
+
+        elif sampling_method == "temperature":
+            policy_b_action = temperature_sampling(
+                key=key_sample,
+                prior=policy_b.action_weights,
                 skill_level=skill_level,
                 legal_mask=legal_b.reshape(-1),
             )
