@@ -261,6 +261,16 @@ def play(
             gumbel_scale=1.0,
         )
 
+        qvalues = policy_b.search_tree.summary().qvalues
+        qvalues = jnp.where(qvalues == 0, jnp.nan, qvalues)
+        jax.debug.print(
+            "variace={v}, max={max}, min={min}",
+            # m=jnp.nanmean(qvalues),
+            v=jnp.nanstd(qvalues),
+            max=jnp.nanmax(qvalues),
+            min=jnp.nanmin(qvalues),
+        )
+
         # Decide which action to take based on the policy B output and the sampling method
         if (
             sampling_method == "dirichlet-argmax"
