@@ -24,6 +24,7 @@ SamplingMethod: TypeAlias = Literal[
     "ranking",
     "ranking-prior",
     "epsilon",
+    "epsilon-ranking",
     "temperature",
 ]
 
@@ -161,8 +162,34 @@ def epsilon_sampling(
     random_action = jax.random.categorical(key_sample, legal_logits)
 
     return jax.lax.select(
-        jax.random.uniform(key_sample) >= skill_level,
+        jax.random.uniform(key_choice) >= skill_level,
         random_action,
+        jnp.squeeze(original_action),
+    )
+
+
+def epsilon_ranking_sampling(
+    key: jnp.ndarray,
+    p: jax.Array,
+    original_action: jax.Array,
+    num_actions: int,
+    skill_level: float,
+    legal_mask: jax.Array,
+    var_mul: float = 3.0,
+):
+    key_sample, key_choice = jax.random.split(key)
+
+    sampled_action = ranking_based_sampling(
+        key=key_sample,
+        prior=p,
+        num_actions=num_actions,
+        skill_level=skill_level * var_mul,
+        legal_mask=legal_mask,
+    )
+
+    return jax.lax.select(
+        jax.random.uniform(key_choice) >= skill_level,
+        jnp.squeeze(sampled_action),
         jnp.squeeze(original_action),
     )
 
@@ -262,6 +289,16 @@ def play(
 
         elif sampling_method == "epsilon":
             policy_b_action = epsilon_sampling(
+                key=key_sample,
+                p=policy_b.action_weights,
+                original_action=policy_b.action,
+                num_actions=env.num_actions,
+                skill_level=skill_level,
+                legal_mask=legal_b.reshape(-1),
+            )
+
+        elif sampling_method == "epsilon-ranking":
+            policy_b_action = epsilon_ranking_sampling(
                 key=key_sample,
                 p=policy_b.action_weights,
                 original_action=policy_b.action,
