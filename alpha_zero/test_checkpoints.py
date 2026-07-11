@@ -26,6 +26,7 @@ SamplingMethod: TypeAlias = Literal[
     "epsilon",
     "epsilon-ranking",
     "temperature",
+    "epsilon-ranking-prior",
 ]
 
 
@@ -42,6 +43,7 @@ class Args(BaseModel):
 
     skill_level: float = 1.0
     dirichlet_alpha: float = 1.0
+    rank_var_mul: float = 3.0
 
     board_size: int = 9
     max_stones: int = 32
@@ -176,6 +178,7 @@ def epsilon_ranking_sampling(
     skill_level: float,
     legal_mask: jax.Array,
     var_mul: float = 3.0,
+    use_prior: bool = False,
 ):
     key_sample, key_choice = jax.random.split(key)
 
@@ -185,6 +188,7 @@ def epsilon_ranking_sampling(
         num_actions=num_actions,
         skill_level=skill_level * var_mul,
         legal_mask=legal_mask,
+        use_prior=use_prior,
     )
 
     return jax.lax.select(
@@ -203,6 +207,7 @@ def play(
     skill_level: float = 1.0,
     dirichlet_alpha: float = 1.0,
     sampling_method: SamplingMethod = "dirichlet-argmax",
+    var_mul: float = 3.0,
 ):
     state = jax.tree.map(lambda x: x[None], state)
 
@@ -261,15 +266,15 @@ def play(
             gumbel_scale=1.0,
         )
 
-        qvalues = policy_b.search_tree.summary().qvalues
-        qvalues = jnp.where(qvalues == 0, jnp.nan, qvalues)
-        jax.debug.print(
-            "variace={v}, max={max}, min={min}",
-            # m=jnp.nanmean(qvalues),
-            v=jnp.nanstd(qvalues),
-            max=jnp.nanmax(qvalues),
-            min=jnp.nanmin(qvalues),
-        )
+        # qvalues = policy_b.search_tree.summary().qvalues
+        # qvalues = jnp.where(qvalues == 0, jnp.nan, qvalues)
+        # jax.debug.print(
+        #     "variace={v}, max={max}, min={min}",
+        #     # m=jnp.nanmean(qvalues),
+        #     v=jnp.nanstd(qvalues),
+        #     max=jnp.nanmax(qvalues),
+        #     min=jnp.nanmin(qvalues),
+        # )
 
         # Decide which action to take based on the policy B output and the sampling method
         if (
@@ -315,6 +320,7 @@ def play(
                 num_actions=env.num_actions,
                 skill_level=skill_level,
                 legal_mask=legal_b.reshape(-1),
+                var_mul=var_mul,
             )
 
         elif sampling_method == "temperature":
@@ -364,6 +370,7 @@ if __name__ == "__main__":
         args.skill_level,
         args.dirichlet_alpha,
         sampling_method=args.sampling_method,
+        var_mul=args.rank_var_mul,
     )
 
     label_a = args.load_path_a.split("/")[-1]
@@ -379,6 +386,8 @@ if __name__ == "__main__":
             f.write(
                 "seed,sampling_method,board_size,k,num_steps,skill_level,dirichlet_alpha,model_A,model_B,return_A,return_B\n"
             )
+            if args.sampling_method == "epsilon-ranking":
+                args.sampling_method += f"-{args.rank_var_mul}"
             f.write(
                 f"{args.seed},{args.sampling_method},{args.board_size},{args.max_stones},{args.max_num_steps},{args.skill_level},{args.dirichlet_alpha},{args.load_path_a},{args.load_path_b},{ret_A},{ret_B}\n"
             )
