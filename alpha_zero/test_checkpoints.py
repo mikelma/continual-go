@@ -316,7 +316,7 @@ def play(
             policy_b_action = epsilon_ranking_sampling(
                 key=key_sample,
                 p=policy_b.action_weights,
-                original_action=policy_b.action,
+                original_action=jnp.squeeze(policy_b.action),
                 num_actions=env.num_actions,
                 skill_level=skill_level,
                 legal_mask=legal_b.reshape(-1),
