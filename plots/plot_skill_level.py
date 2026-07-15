@@ -90,8 +90,12 @@ def many(
     data: str = "./data_skill_level.csv",
     font_size: int = 17,
     plot: Literal["line", "box"] = "box",
+    select: list[str] = [],
 ):
     df = pd.read_csv(data)
+
+    if len(select) > 0:
+        df = df[df["sampling_method"].isin(select)]
 
     plt.rcParams.update({"font.size": font_size})
 
@@ -104,6 +108,7 @@ def many(
         r, p = sp.stats.pearsonr(sel["skill_level"], sel["return_A"])
         corrs.append(r)
         print(method)
+        print(df.groupby("skill_level")["seed"].nunique())
         if "ranking" in method:
             df.loc[df["sampling_method"] == method, "skill_level"] /= df[
                 df["sampling_method"] == method
