@@ -46,7 +46,7 @@ class Args(BaseModel):
     skill_level: float = 1.0
     dirichlet_alpha: float = 1.0
     rank_var_mul: float = 3.0
-    eps_margin: float = jnp.inf
+    eps_margin: float | tuple[float, float] = jnp.inf
 
     board_size: int = 9
     max_stones: int = 32
@@ -389,6 +389,10 @@ if __name__ == "__main__":
     model_a = load_checkpoint(args.load_path_a)["model"]
     model_b = load_checkpoint(args.load_path_b)["model"]
 
+    eps_margin = args.eps_margin
+    if isinstance(args.eps_margin, tuple):
+        eps_margin = sum(eps_margin) - args.skill_level * eps_margin[1]  # ty: ignore
+
     state = env.init()
     board_a, board_b, reward_a, reward_b, policy_b_qvalues, action_b_changes = play(
         model_a,
@@ -399,7 +403,7 @@ if __name__ == "__main__":
         args.dirichlet_alpha,
         sampling_method=args.sampling_method,
         var_mul=args.rank_var_mul,
-        eps_q_margin=args.eps_margin,
+        eps_q_margin=eps_margin,
     )
 
     label_a = args.load_path_a.split("/")[-1]
@@ -418,8 +422,10 @@ if __name__ == "__main__":
             if args.sampling_method == "epsilon-ranking":
                 args.sampling_method += f"-{args.rank_var_mul}"
 
-            if args.sampling_method == "clip-epsilon":
-                args.sampling_method += f"-{args.eps_margin}"
+            if args.sampling_method == "clip-epsilon" and isinstance(
+                args.eps_margin, tuple
+            ):
+                args.sampling_method += f"-{args.eps_margin[0]}-{args.eps_margin[1]}"
 
             f.write(
                 f"{args.seed},{args.sampling_method},{args.board_size},{args.max_stones},{args.max_num_steps},{args.skill_level},{args.dirichlet_alpha},{args.load_path_a},{args.load_path_b},{ret_A},{ret_B}\n"
