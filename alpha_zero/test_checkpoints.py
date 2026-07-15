@@ -417,6 +417,10 @@ if __name__ == "__main__":
             )
             if args.sampling_method == "epsilon-ranking":
                 args.sampling_method += f"-{args.rank_var_mul}"
+
+            if args.sampling_method == "clip-epsilon":
+                args.sampling_method += f"-{args.eps_margin}"
+
             f.write(
                 f"{args.seed},{args.sampling_method},{args.board_size},{args.max_stones},{args.max_num_steps},{args.skill_level},{args.dirichlet_alpha},{args.load_path_a},{args.load_path_b},{ret_A},{ret_B}\n"
             )
