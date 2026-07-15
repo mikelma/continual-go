@@ -3,6 +3,7 @@ import tyro
 import haiku as hk
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
+from matplotlib.gridspec import GridSpec
 import pickle
 import jax.numpy as jnp
 from pydantic import BaseModel
@@ -25,6 +26,7 @@ SamplingMethod: TypeAlias = Literal[
     "ranking-prior",
     "epsilon",
     "epsilon-ranking",
+    "clip-epsilon",
     "temperature",
     "epsilon-ranking-prior",
 ]
@@ -44,6 +46,7 @@ class Args(BaseModel):
     skill_level: float = 1.0
     dirichlet_alpha: float = 1.0
     rank_var_mul: float = 3.0
+    eps_margin: float = jnp.inf
 
     board_size: int = 9
     max_stones: int = 32
@@ -61,6 +64,7 @@ class Args(BaseModel):
 
     record_gif: bool = False
     show_plot: bool = False
+    font_size: int = 16
     save_csv: bool = False
     csv_dir: str = "./"
 
@@ -208,6 +212,7 @@ def play(
     dirichlet_alpha: float = 1.0,
     sampling_method: SamplingMethod = "dirichlet-argmax",
     var_mul: float = 3.0,
+    eps_q_margin: float = jnp.inf,
 ):
     state = jax.tree.map(lambda x: x[None], state)
 
@@ -227,7 +232,7 @@ def play(
             params=model_a,
             rng_key=mctx_key,
             root=root_a,
-            recurrent_fn=recurrent_fn,
+            recurrent_fn=recurrent_fn,  # ty: ignore[invalid-argument-type]
             num_simulations=config.num_simulations,
             invalid_actions=(~legal_a).reshape(logits_a.shape),
             qtransform=mctx.qtransform_completed_by_mix_value,
@@ -258,11 +263,11 @@ def play(
             params=model_b,
             rng_key=mctx_key,
             root=root_b,
-            recurrent_fn=recurrent_fn,
+            recurrent_fn=recurrent_fn,  # ty: ignore[invalid-argument-type]
             num_simulations=config.num_simulations,
             invalid_actions=(~legal_b).reshape(logits_b.shape),
             qtransform=mctx.qtransform_completed_by_mix_value,
-            max_depth=(config.num_simulations * skill_level).astype(jnp.int32),
+            max_depth=(config.num_simulations * skill_level).astype(jnp.int32),  # ty: ignore
             gumbel_scale=1.0,
         )
 
@@ -275,6 +280,8 @@ def play(
         #     max=jnp.nanmax(qvalues),
         #     min=jnp.nanmin(qvalues),
         # )
+
+        policy_b_qvalues = policy_b.search_tree.summary().qvalues
 
         # Decide which action to take based on the policy B output and the sampling method
         if (
@@ -295,27 +302,41 @@ def play(
         elif sampling_method == "ranking" or sampling_method == "ranking-prior":
             policy_b_action = ranking_based_sampling(
                 key=key_sample,
-                prior=policy_b.action_weights[0],
+                prior=policy_b.action_weights[0],  # ty: ignore
                 num_actions=env.num_actions,
                 skill_level=skill_level,
                 legal_mask=legal_b.reshape(-1),
                 use_prior=sampling_method == "ranking-prior",
             )
 
-        elif sampling_method == "epsilon":
+        elif sampling_method in ["epsilon", "clip-epsilon"]:
             policy_b_action = epsilon_sampling(
                 key=key_sample,
-                p=policy_b.action_weights,
-                original_action=policy_b.action,
+                p=policy_b.action_weights,  # ty: ignore[invalid-argument-type]
+                original_action=policy_b.action,  # ty: ignore[invalid-argument-type]
                 num_actions=env.num_actions,
                 skill_level=skill_level,
                 legal_mask=legal_b.reshape(-1),
             )
 
+            if sampling_method == "clip-epsilon":
+                policy_b_qvalues = jnp.where(
+                    policy_b_qvalues == 0, jnp.nan, policy_b_qvalues
+                )
+                margin = jnp.squeeze(
+                    jnp.nanmax(policy_b_qvalues, axis=-1)
+                    - jnp.nanmin(policy_b_qvalues, axis=-1)
+                )
+                policy_b_action = jax.lax.select(
+                    margin >= eps_q_margin,
+                    jnp.squeeze(policy_b.action),
+                    policy_b_action,
+                )
+
         elif sampling_method == "epsilon-ranking":
             policy_b_action = epsilon_ranking_sampling(
                 key=key_sample,
-                p=policy_b.action_weights,
+                p=policy_b.action_weights,  # ty: ignore[invalid-argument-type]
                 original_action=jnp.squeeze(policy_b.action),
                 num_actions=env.num_actions,
                 skill_level=skill_level,
@@ -326,7 +347,7 @@ def play(
         elif sampling_method == "temperature":
             policy_b_action = temperature_sampling(
                 key=key_sample,
-                prior=policy_b.action_weights,
+                prior=policy_b.action_weights,  # ty: ignore[invalid-argument-type]
                 skill_level=skill_level,
                 legal_mask=legal_b.reshape(-1),
             )
@@ -337,7 +358,14 @@ def play(
         policy_b_action = jnp.expand_dims(policy_b_action, 0)
         state_b, reward_b = jax.vmap(env.step_turn)(state_a, policy_b_action)
 
-        return state_b, (state_a.board, state_b.board, reward_a, reward_b)
+        return state_b, (
+            state_a.board,
+            state_b.board,
+            reward_a,
+            reward_b,
+            policy_b_qvalues,
+            policy_b.action != policy_b_action,
+        )
 
     key_seq = jax.random.split(rng_key, config.max_num_steps)
     final_state, data = jax.lax.scan(step_fn, state, key_seq)
@@ -362,7 +390,7 @@ if __name__ == "__main__":
     model_b = load_checkpoint(args.load_path_b)["model"]
 
     state = env.init()
-    board_a, board_b, reward_a, reward_b = play(
+    board_a, board_b, reward_a, reward_b, policy_b_qvalues, action_b_changes = play(
         model_a,
         model_b,
         state,
@@ -371,6 +399,7 @@ if __name__ == "__main__":
         args.dirichlet_alpha,
         sampling_method=args.sampling_method,
         var_mul=args.rank_var_mul,
+        eps_q_margin=args.eps_margin,
     )
 
     label_a = args.load_path_a.split("/")[-1]
@@ -393,17 +422,55 @@ if __name__ == "__main__":
             )
 
     if args.show_plot:
-        font_size = 16
-        fig, ax = plt.subplots()
-        plt.rcParams.update({"font.size": font_size})
-        ax.plot(jnp.cumsum(reward_b), label="AlphaZero B", color="#2980b9")
-        ax.plot(jnp.cumsum(reward_a), label="AlphaZero A", color="#e74c3c")
-        ax.set_ylabel("Cumulative reward", fontsize=font_size)
-        ax.set_xlabel("Steps", fontsize=font_size)
-        ax.legend(fontsize=font_size, frameon=False)
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-        plt.tight_layout()
+        fig = plt.figure()
+        gs = GridSpec(3, 1, height_ratios=[3, 1, 1])
+        plt.rcParams.update({"font.size": args.font_size})
+
+        ax1 = fig.add_subplot(gs[0])
+        ax2 = fig.add_subplot(gs[1])
+        ax3 = fig.add_subplot(gs[2])
+        axs = [ax1, ax2, ax3]
+
+        ax1.plot(jnp.cumsum(reward_b), label="AlphaZero B", color="#2980b9")
+        ax1.plot(jnp.cumsum(reward_a), label="AlphaZero A", color="#e74c3c")
+        ax1.set_ylabel("Cumulative reward", fontsize=args.font_size)
+        ax1.set_xlabel("Steps", fontsize=args.font_size)
+
+        policy_b_qvalues = policy_b_qvalues.at[policy_b_qvalues == 0].set(jnp.nan)
+        ax2.plot(jnp.nanmean(policy_b_qvalues, axis=-1), label="mean")
+        ax2.plot(jnp.nanmax(policy_b_qvalues, axis=-1), label="max")
+        ax2.plot(jnp.nanmin(policy_b_qvalues, axis=-1), label="min")
+        changes = jnp.arange(args.max_num_steps)
+        bad_changes = list(
+            changes[(jnp.squeeze(action_b_changes) & jnp.squeeze(reward_a > 0))]
+        )
+        changes = changes[jnp.squeeze(action_b_changes)]
+        for i, coord in enumerate(changes):
+            kwa = dict(
+                x=coord,
+                label="changes",
+                color="tab:gray",
+                alpha=1 if coord in bad_changes else 0.2,
+            )
+            if i > 0:
+                del kwa["label"]
+            [ax.axvline(**kwa) for ax in axs]  # ty: ignore[invalid-argument-type]
+        ax2.set_ylabel("Q-values (policy B)", fontsize=args.font_size)
+        ax2.set_xlabel("Steps", fontsize=args.font_size)
+
+        margin = jnp.nanmax(policy_b_qvalues, axis=-1) - jnp.nanmin(
+            policy_b_qvalues, axis=-1
+        )
+        ax3.plot(margin)
+        ax2.set_ylabel("Max Q - Min Q (B)", fontsize=args.font_size)
+        ax2.set_xlabel("Steps", fontsize=args.font_size)
+
+        for ax in axs:
+            ax.legend(fontsize=args.font_size, frameon=False)
+            ax.spines["top"].set_visible(False)
+            ax.spines["right"].set_visible(False)
+
+        # plt.tight_layout()
         plt.savefig("reward_curve.png", dpi=500)
         plt.show()
 
