@@ -236,7 +236,7 @@ def play(
             num_simulations=config.num_simulations,
             invalid_actions=(~legal_a).reshape(logits_a.shape),
             qtransform=mctx.qtransform_completed_by_mix_value,
-            gumbel_scale=1.0,
+            gumbel_scale=0,
         )
 
         key, sample_key = jax.random.split(key)
@@ -267,8 +267,8 @@ def play(
             num_simulations=config.num_simulations,
             invalid_actions=(~legal_b).reshape(logits_b.shape),
             qtransform=mctx.qtransform_completed_by_mix_value,
-            max_depth=(config.num_simulations * skill_level).astype(jnp.int32),  # ty: ignore
-            gumbel_scale=1.0,
+            # max_depth=(config.num_simulations * skill_level).astype(jnp.int32),  # ty: ignore
+            gumbel_scale=0,
         )
 
         # qvalues = policy_b.search_tree.summary().qvalues
