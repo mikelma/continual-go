@@ -16,15 +16,15 @@ import wandb
 from pydantic import BaseModel
 import tyro
 
-from network import AZNet
-from config import Config
+from continual_go.alpha_zero.network import AZNet
+from continual_go.alpha_zero.config import Config
 from continual_go import ContinualGo, State
 
 devices = jax.local_devices()
 num_devices = len(devices)
 
 config = tyro.cli(Config)
-env = ContinualGo(size=config.board_size, k=config.max_stones, opponent_model=None, az_config=None)
+env = ContinualGo.create_selfplay(size=config.board_size, k=config.max_stones)
 
 def forward_fn(x, is_eval=False):
     net = AZNet(
