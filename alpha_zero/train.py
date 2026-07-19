@@ -4,7 +4,6 @@ import datetime
 import os
 import pickle
 import time
-from functools import partial
 from typing import NamedTuple
 
 import haiku as hk
@@ -19,9 +18,6 @@ import tyro
 from continual_go.alpha_zero.network import AZNet
 from continual_go.alpha_zero.config import Config
 from continual_go import ContinualGo, State
-
-devices = jax.local_devices()
-num_devices = len(devices)
 
 config = tyro.cli(Config)
 assert config.selfplay_batch_size * config.max_num_steps % config.training_batch_size == 0, "selfplay_batch_size * max_num_steps must be divisble by training_batch_size"
@@ -80,7 +76,6 @@ class SelfplayOutput(NamedTuple):
     action_weights: jnp.ndarray
 
 
-@jax.pmap
 def selfplay(model, state: State, rng_key: jnp.ndarray) -> tuple[SelfplayOutput, State]:
     model_params, model_state = model
 
@@ -127,7 +122,6 @@ class Sample(NamedTuple):
     value_tgt: jnp.ndarray
 
 
-@jax.pmap
 def compute_loss_input(model, data: SelfplayOutput, final_state: State) -> Sample:
     model_params, model_state = model
 
@@ -175,17 +169,51 @@ def loss_fn(model_params, model_state, samples: Sample):
     return policy_loss + value_loss, (model_state, policy_loss, value_loss)
 
 
-@partial(jax.pmap, axis_name="i")
 def train(model, opt_state, data: Sample):
     model_params, model_state = model
     grads, (model_state, policy_loss, value_loss) = jax.grad(loss_fn, has_aux=True)(
         model_params, model_state, data
     )
-    grads = jax.lax.pmean(grads, axis_name="i")
     updates, opt_state = optimizer.update(grads, opt_state)
     model_params = optax.apply_updates(model_params, updates)
     model = (model_params, model_state)
     return model, opt_state, policy_loss, value_loss
+
+@jax.jit
+def experiment_loop(rng_key, model, state, opt_state):
+    # Selfplay (continuing — state is carried over from the previous iteration)
+    rng_key, subkey = jax.random.split(rng_key)
+    data, state = selfplay(model, state, subkey)
+    avg_reward = data.reward.mean()
+    samples: Sample = compute_loss_input(model, data, state)
+
+    # Flatten (max_num_steps, batch) into a single sample axis, then shuffle.
+    samples = jax.tree_util.tree_map(lambda x: x.reshape((-1, *x.shape[2:])), samples)
+    rng_key, subkey = jax.random.split(rng_key)
+    ixs = jax.random.permutation(subkey, jnp.arange(samples.obs.shape[0]))
+    samples = jax.tree_util.tree_map(lambda x: x[ixs], samples)  # shuffle
+
+    # Make minibatches: (num_updates, training_batch_size, ...)
+    num_updates = samples.obs.shape[0] // config.training_batch_size
+    minibatches = jax.tree_util.tree_map(
+        lambda x: x.reshape((num_updates, config.training_batch_size) + x.shape[1:]),
+        samples,
+    )
+
+    def minibatch_train(carry, minibatch):
+        model, opt_state = carry
+        model, opt_state, policy_loss, value_loss = train(model, opt_state, minibatch)
+        return (model, opt_state), (policy_loss, value_loss)
+
+    (model, opt_state), (policy_losses, value_losses) = jax.lax.scan(
+        minibatch_train, (model, opt_state), minibatches
+    )
+
+    policy_loss = jnp.mean(policy_losses)
+    value_loss = jnp.mean(value_losses)
+
+    return state, rng_key, model, opt_state, policy_loss, value_loss, avg_reward
+
 
 if __name__ == "__main__":
     if not config.wandb:
@@ -201,21 +229,14 @@ if __name__ == "__main__":
     ).astype(jnp.float32)
     model = forward.init(jax.random.PRNGKey(0), dummy_input)  # (params, state)
     opt_state = optimizer.init(params=model[0])
-    # replicates to all devices (drop-in for the deprecated jax.device_put_replicated)
-    # We just add a leading device axis; the @jax.pmap'd functions below handle placement.
-    def _replicate(x):
-        return jnp.broadcast_to(x[None], (num_devices,) + x.shape)
-
-    model, opt_state = jax.tree.map(_replicate, (model, opt_state))
 
     # persistent env state across iterations (never reset).
-    # Shape per leaf: (num_devices, batch_per_device, ...).
-    batch_per_device = config.selfplay_batch_size // num_devices
+    # Shape per leaf: (selfplay_batch_size, ...).
     init_state = env.init()
     state = jax.tree.map(
         lambda x: jnp.broadcast_to(
-            jnp.asarray(x)[None, None],
-            (num_devices, batch_per_device) + jnp.asarray(x).shape,
+            jnp.asarray(x)[None],
+            (config.selfplay_batch_size,) + jnp.asarray(x).shape,
         ),
         init_state,
     )
@@ -236,13 +257,12 @@ if __name__ == "__main__":
     while True:
         # Store checkpoints
         if iteration % config.save_interval == 0:
-            model_0, opt_state_0 = jax.tree_util.tree_map(lambda x: x[0], (model, opt_state))
             with open(os.path.join(ckpt_dir, f"{iteration:06d}.ckpt"), "wb") as f:
                 dic = {
                        "config": config,
                        "rng_key": rng_key,
-                       "model": jax.device_get(model_0),
-                       "opt_state": jax.device_get(opt_state_0),
+                       "model": jax.device_get(model),
+                       "opt_state": jax.device_get(opt_state),
                        "iteration": iteration,
                        "frames": frames,
                        "hours": hours,
@@ -259,42 +279,15 @@ if __name__ == "__main__":
         log = {"iteration": iteration}
         st = time.time()
 
-        # Selfplay (continuing — state is carried over from the previous iteration)
-        rng_key, subkey = jax.random.split(rng_key)
-        keys = jax.random.split(subkey, num_devices)
-        data, state = selfplay(model, state, keys)
-        avg_reward = float(jax.device_get(data.reward).mean())
-        samples: Sample = compute_loss_input(model, data, state)
-
-        # Shuffle samples and make minibatches
-        samples = jax.device_get(samples)  # (#devices, batch, max_num_steps, ...)
-        frames += samples.obs.shape[0] * samples.obs.shape[1] * samples.obs.shape[2]
-        samples = jax.tree_util.tree_map(lambda x: x.reshape((-1, *x.shape[3:])), samples)
-        rng_key, subkey = jax.random.split(rng_key)
-        ixs = jax.random.permutation(subkey, jnp.arange(samples.obs.shape[0]))
-        samples = jax.tree_util.tree_map(lambda x: x[ixs], samples)  # shuffle
-        num_updates = samples.obs.shape[0] // config.training_batch_size
-        minibatches = jax.tree_util.tree_map(
-            lambda x: x.reshape((num_updates, num_devices, -1) + x.shape[1:]), samples
-        )
-
-        # Training
-        policy_losses, value_losses = [], []
-        for i in range(num_updates):
-            minibatch: Sample = jax.tree_util.tree_map(lambda x: x[i], minibatches)
-            model, opt_state, policy_loss, value_loss = train(model, opt_state, minibatch)
-            policy_losses.append(policy_loss.mean().item())
-            value_losses.append(value_loss.mean().item())
-        policy_loss = sum(policy_losses) / len(policy_losses)
-        value_loss = sum(value_losses) / len(value_losses)
-
+        state, rng_key, model, opt_state, policy_loss, value_loss, avg_reward = experiment_loop(rng_key, model, state, opt_state)
+        frames += config.selfplay_batch_size * config.max_num_steps
         et = time.time()
         hours += (et - st) / 3600
         log.update(
             {
-                "train/policy_loss": policy_loss,
-                "train/value_loss": value_loss,
-                "train/avg_reward_per_step": avg_reward,
+                "train/policy_loss": float(policy_loss),
+                "train/value_loss": float(value_loss),
+                "train/avg_reward_per_step": float(avg_reward),
                 "hours": hours,
                 "frames": frames,
             }
