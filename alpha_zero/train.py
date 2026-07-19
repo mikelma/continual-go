@@ -262,7 +262,7 @@ if __name__ == "__main__":
     # Prepare checkpoint dir
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     now = now.strftime("%Y%m%d%H%M%S")
-    ckpt_dir = os.path.join("checkpoints", f"continual_go_az_{now}_{config.board_size}")
+    ckpt_dir = os.path.join("checkpoints", f"continual_go_az_{now}_{config.board_size}_{config.max_stones}_{config.seed}")
     os.makedirs(ckpt_dir, exist_ok=True)
 
     # Initialize logging dict
