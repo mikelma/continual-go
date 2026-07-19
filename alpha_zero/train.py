@@ -187,37 +187,6 @@ def train(model, opt_state, data: Sample):
     return model, opt_state, policy_loss, value_loss
 
 
-# @jax.pmap
-# def evaluate(rng_key, my_model):
-#     """A simplified evaluation by sampling. Only for debugging.
-#     Please use MCTS and run tournaments for serious evaluation."""
-#     my_player = 0
-#     my_model_params, my_model_state = my_model
-
-#     key, subkey = jax.random.split(rng_key)
-#     batch_size = config.selfplay_batch_size // num_devices
-#     keys = jax.random.split(subkey, batch_size)
-#     state = jax.vmap(env.init)(keys)
-
-#     def body_fn(val):
-#         key, state, R = val
-#         (my_logits, _), _ = forward.apply(
-#             my_model_params, my_model_state, state.observation, is_eval=True
-#         )
-#         opp_logits, _ = baseline(state.observation)
-#         is_my_turn = (state.current_player == my_player).reshape((-1, 1))
-#         logits = jnp.where(is_my_turn, my_logits, opp_logits)
-#         key, subkey = jax.random.split(key)
-#         action = jax.random.categorical(subkey, logits, axis=-1)
-#         state = jax.vmap(env.step_turn)(state, action)
-#         R = R + state.rewards[jnp.arange(batch_size), my_player]
-#         return (key, state, R)
-
-#     _, _, R = jax.lax.while_loop(
-#         lambda x: ~(x[1].terminated.all()), body_fn, (key, state, jnp.zeros(batch_size))
-#     )
-#     return R
-
 
 if __name__ == "__main__":
     if not config.wandb:
