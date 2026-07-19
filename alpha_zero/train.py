@@ -235,20 +235,6 @@ if __name__ == "__main__":
 
     rng_key = jax.random.PRNGKey(config.seed)
     while True:
-        # if iteration % config.eval_interval == 0:
-        #     # Evaluation
-        #     rng_key, subkey = jax.random.split(rng_key)
-        #     keys = jax.random.split(subkey, num_devices)
-        #     R = evaluate(keys, model)
-        #     log.update(
-        #         {
-        #             f"eval/vs_baseline/avg_R": R.mean().item(),
-        #             f"eval/vs_baseline/win_rate": ((R == 1).sum() / R.size).item(),
-        #             f"eval/vs_baseline/draw_rate": ((R == 0).sum() / R.size).item(),
-        #             f"eval/vs_baseline/lose_rate": ((R == -1).sum() / R.size).item(),
-        #         }
-        #     )
-
         # Store checkpoints
         if iteration % config.save_interval == 0:
             model_0, opt_state_0 = jax.tree_util.tree_map(lambda x: x[0], (model, opt_state))
