@@ -21,6 +21,7 @@ from continual_go import ContinualGo, State
 
 config = tyro.cli(Config)
 assert config.selfplay_batch_size * config.max_num_steps % config.training_batch_size == 0, "selfplay_batch_size * max_num_steps must be divisble by training_batch_size"
+assert 2 * config.max_stones < config.board_size**2, "2 * max_stones must be < board_size^2, otherwise the board can fill up and leave no legal moves"
 env = ContinualGo.create_selfplay(size=config.board_size, k=config.max_stones)
 
 def forward_fn(x, is_eval=False):
@@ -74,6 +75,8 @@ class SelfplayOutput(NamedTuple):
     obs: jnp.ndarray
     reward: jnp.ndarray
     action_weights: jnp.ndarray
+    num_legal: jnp.ndarray  # checks the available legal actions
+    illegal_move: jnp.ndarray  # checks if the action played is illegal
 
 
 def selfplay(model, state: State, rng_key: jnp.ndarray) -> tuple[SelfplayOutput, State]:
@@ -88,7 +91,8 @@ def selfplay(model, state: State, rng_key: jnp.ndarray) -> tuple[SelfplayOutput,
         )
 
         # full legal-action mask at the MCTS root
-        invalid_actions = ~jax.vmap(env.legal_actions)(state).reshape(logits.shape)
+        legal = jax.vmap(env.legal_actions)(state).reshape(logits.shape)
+        invalid_actions = ~legal
 
         root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=state)
 
@@ -102,12 +106,16 @@ def selfplay(model, state: State, rng_key: jnp.ndarray) -> tuple[SelfplayOutput,
             qtransform=mctx.qtransform_completed_by_mix_value,
             gumbel_scale=1.0,
         )
-        state, reward = jax.vmap(env.step_turn)(state, policy_output.action)
+        action = policy_output.action
+        illegal_move = ~jnp.take_along_axis(legal, action[:, None], axis=1)[:, 0]
+        state, reward = jax.vmap(env.step_turn)(state, action)
 
         return state, SelfplayOutput(
             obs=observation,
             action_weights=policy_output.action_weights,
             reward=reward,
+            num_legal=legal.sum(axis=1),
+            illegal_move=illegal_move,
         )
 
     key_seq = jax.random.split(rng_key, config.max_num_steps)
@@ -185,6 +193,10 @@ def experiment_loop(rng_key, model, state, opt_state):
     rng_key, subkey = jax.random.split(rng_key)
     data, state = selfplay(model, state, subkey)
     avg_reward = data.reward.mean()
+    # diagnostics for legal actions
+    avg_num_legal = data.num_legal.astype(jnp.float32).mean()
+    frac_no_legal = (data.num_legal == 0).mean()
+    frac_illegal_moves = data.illegal_move.mean()
     samples: Sample = compute_loss_input(model, data, state)
 
     # Flatten (max_num_steps, batch) into a single sample axis, then shuffle.
@@ -209,10 +221,16 @@ def experiment_loop(rng_key, model, state, opt_state):
         minibatch_train, (model, opt_state), minibatches
     )
 
-    policy_loss = jnp.mean(policy_losses)
-    value_loss = jnp.mean(value_losses)
+    metrics = {
+        "train/policy_loss": jnp.mean(policy_losses),
+        "train/value_loss": jnp.mean(value_losses),
+        "train/avg_reward_per_step": avg_reward,
+        "selfplay/avg_num_legal_actions": avg_num_legal,
+        "selfplay/frac_states_no_legal_action": frac_no_legal,
+        "selfplay/frac_illegal_moves": frac_illegal_moves,
+    }
 
-    return state, rng_key, model, opt_state, policy_loss, value_loss, avg_reward
+    return state, rng_key, model, opt_state, metrics
 
 
 if __name__ == "__main__":
@@ -279,16 +297,9 @@ if __name__ == "__main__":
         log = {"iteration": iteration}
         st = time.time()
 
-        state, rng_key, model, opt_state, policy_loss, value_loss, avg_reward = experiment_loop(rng_key, model, state, opt_state)
+        state, rng_key, model, opt_state, metrics = experiment_loop(rng_key, model, state, opt_state)
         frames += config.selfplay_batch_size * config.max_num_steps
         et = time.time()
         hours += (et - st) / 3600
-        log.update(
-            {
-                "train/policy_loss": float(policy_loss),
-                "train/value_loss": float(value_loss),
-                "train/avg_reward_per_step": float(avg_reward),
-                "hours": hours,
-                "frames": frames,
-            }
-        )
+        log.update({k: float(v) for k, v in metrics.items()})
+        log.update({"hours": hours, "frames": frames})
