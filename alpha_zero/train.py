@@ -24,6 +24,7 @@ devices = jax.local_devices()
 num_devices = len(devices)
 
 config = tyro.cli(Config)
+assert config.selfplay_batch_size * config.max_num_steps % config.training_batch_size == 0, "selfplay_batch_size * max_num_steps must be divisble by training_batch_size"
 env = ContinualGo.create_selfplay(size=config.board_size, k=config.max_stones)
 
 def forward_fn(x, is_eval=False):
@@ -186,8 +187,6 @@ def train(model, opt_state, data: Sample):
     model = (model_params, model_state)
     return model, opt_state, policy_loss, value_loss
 
-
-
 if __name__ == "__main__":
     if not config.wandb:
         os.environ["WANDB_MODE"] = "disabled"
@@ -224,7 +223,7 @@ if __name__ == "__main__":
     # Prepare checkpoint dir
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     now = now.strftime("%Y%m%d%H%M%S")
-    ckpt_dir = os.path.join("checkpoints", f"continual_go_az_{now}")
+    ckpt_dir = os.path.join("checkpoints", f"continual_go_az_{now}_{config.board_size}")
     os.makedirs(ckpt_dir, exist_ok=True)
 
     # Initialize logging dict
