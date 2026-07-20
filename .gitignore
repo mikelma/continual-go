@@ -11,3 +11,7 @@ wheels/
 
 # Wandb logs
 wandb/
+
+.DS_Store
+.vscode/
+checkpoints/

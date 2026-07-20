@@ -4,7 +4,6 @@ import datetime
 import os
 import pickle
 import time
-from functools import partial
 from typing import NamedTuple
 
 import haiku as hk
@@ -16,15 +15,14 @@ import wandb
 from pydantic import BaseModel
 import tyro
 
-from network import AZNet
-from config import Config
+from continual_go.alpha_zero.network import AZNet
+from continual_go.alpha_zero.config import Config
 from continual_go import ContinualGo, State
 
-devices = jax.local_devices()
-num_devices = len(devices)
-
 config = tyro.cli(Config)
-env = ContinualGo(size=config.board_size, k=config.max_stones, opponent_model=None, az_config=None)
+assert config.selfplay_batch_size * config.max_num_steps % config.training_batch_size == 0, "selfplay_batch_size * max_num_steps must be divisble by training_batch_size"
+assert 2 * config.max_stones < config.board_size**2, "2 * max_stones must be < board_size^2, otherwise the board can fill up and leave no legal moves"
+env = ContinualGo.create_selfplay(size=config.board_size, k=config.max_stones)
 
 def forward_fn(x, is_eval=False):
     net = AZNet(
@@ -77,9 +75,10 @@ class SelfplayOutput(NamedTuple):
     obs: jnp.ndarray
     reward: jnp.ndarray
     action_weights: jnp.ndarray
+    num_legal: jnp.ndarray  # checks the available legal actions
+    illegal_move: jnp.ndarray  # checks if the action played is illegal
 
 
-@jax.pmap
 def selfplay(model, state: State, rng_key: jnp.ndarray) -> tuple[SelfplayOutput, State]:
     model_params, model_state = model
 
@@ -92,7 +91,8 @@ def selfplay(model, state: State, rng_key: jnp.ndarray) -> tuple[SelfplayOutput,
         )
 
         # full legal-action mask at the MCTS root
-        invalid_actions = ~jax.vmap(env.legal_actions)(state).reshape(logits.shape)
+        legal = jax.vmap(env.legal_actions)(state).reshape(logits.shape)
+        invalid_actions = ~legal
 
         root = mctx.RootFnOutput(prior_logits=logits, value=value, embedding=state)
 
@@ -106,12 +106,16 @@ def selfplay(model, state: State, rng_key: jnp.ndarray) -> tuple[SelfplayOutput,
             qtransform=mctx.qtransform_completed_by_mix_value,
             gumbel_scale=1.0,
         )
-        state, reward = jax.vmap(env.step_turn)(state, policy_output.action)
+        action = policy_output.action
+        illegal_move = ~jnp.take_along_axis(legal, action[:, None], axis=1)[:, 0]
+        state, reward = jax.vmap(env.step_turn)(state, action)
 
         return state, SelfplayOutput(
             obs=observation,
             action_weights=policy_output.action_weights,
             reward=reward,
+            num_legal=legal.sum(axis=1),
+            illegal_move=illegal_move,
         )
 
     key_seq = jax.random.split(rng_key, config.max_num_steps)
@@ -126,7 +130,6 @@ class Sample(NamedTuple):
     value_tgt: jnp.ndarray
 
 
-@jax.pmap
 def compute_loss_input(model, data: SelfplayOutput, final_state: State) -> Sample:
     model_params, model_state = model
 
@@ -174,49 +177,60 @@ def loss_fn(model_params, model_state, samples: Sample):
     return policy_loss + value_loss, (model_state, policy_loss, value_loss)
 
 
-@partial(jax.pmap, axis_name="i")
 def train(model, opt_state, data: Sample):
     model_params, model_state = model
     grads, (model_state, policy_loss, value_loss) = jax.grad(loss_fn, has_aux=True)(
         model_params, model_state, data
     )
-    grads = jax.lax.pmean(grads, axis_name="i")
     updates, opt_state = optimizer.update(grads, opt_state)
     model_params = optax.apply_updates(model_params, updates)
     model = (model_params, model_state)
     return model, opt_state, policy_loss, value_loss
 
+@jax.jit
+def experiment_loop(rng_key, model, state, opt_state):
+    # Selfplay (continuing — state is carried over from the previous iteration)
+    rng_key, subkey = jax.random.split(rng_key)
+    data, state = selfplay(model, state, subkey)
+    avg_reward = data.reward.mean()
+    # diagnostics for legal actions
+    avg_num_legal = data.num_legal.astype(jnp.float32).mean()
+    frac_no_legal = (data.num_legal == 0).mean()
+    frac_illegal_moves = data.illegal_move.mean()
+    samples: Sample = compute_loss_input(model, data, state)
 
-# @jax.pmap
-# def evaluate(rng_key, my_model):
-#     """A simplified evaluation by sampling. Only for debugging.
-#     Please use MCTS and run tournaments for serious evaluation."""
-#     my_player = 0
-#     my_model_params, my_model_state = my_model
+    # Flatten (max_num_steps, batch) into a single sample axis, then shuffle.
+    samples = jax.tree_util.tree_map(lambda x: x.reshape((-1, *x.shape[2:])), samples)
+    rng_key, subkey = jax.random.split(rng_key)
+    ixs = jax.random.permutation(subkey, jnp.arange(samples.obs.shape[0]))
+    samples = jax.tree_util.tree_map(lambda x: x[ixs], samples)  # shuffle
 
-#     key, subkey = jax.random.split(rng_key)
-#     batch_size = config.selfplay_batch_size // num_devices
-#     keys = jax.random.split(subkey, batch_size)
-#     state = jax.vmap(env.init)(keys)
+    # Make minibatches: (num_updates, training_batch_size, ...)
+    num_updates = samples.obs.shape[0] // config.training_batch_size
+    minibatches = jax.tree_util.tree_map(
+        lambda x: x.reshape((num_updates, config.training_batch_size) + x.shape[1:]),
+        samples,
+    )
 
-#     def body_fn(val):
-#         key, state, R = val
-#         (my_logits, _), _ = forward.apply(
-#             my_model_params, my_model_state, state.observation, is_eval=True
-#         )
-#         opp_logits, _ = baseline(state.observation)
-#         is_my_turn = (state.current_player == my_player).reshape((-1, 1))
-#         logits = jnp.where(is_my_turn, my_logits, opp_logits)
-#         key, subkey = jax.random.split(key)
-#         action = jax.random.categorical(subkey, logits, axis=-1)
-#         state = jax.vmap(env.step_turn)(state, action)
-#         R = R + state.rewards[jnp.arange(batch_size), my_player]
-#         return (key, state, R)
+    def minibatch_train(carry, minibatch):
+        model, opt_state = carry
+        model, opt_state, policy_loss, value_loss = train(model, opt_state, minibatch)
+        return (model, opt_state), (policy_loss, value_loss)
 
-#     _, _, R = jax.lax.while_loop(
-#         lambda x: ~(x[1].terminated.all()), body_fn, (key, state, jnp.zeros(batch_size))
-#     )
-#     return R
+    (model, opt_state), (policy_losses, value_losses) = jax.lax.scan(
+        minibatch_train, (model, opt_state), minibatches
+    )
+
+    metrics = {
+        "train/policy_loss": jnp.mean(policy_losses),
+        "train/value_loss": jnp.mean(value_losses),
+        "train/avg_reward_per_step": avg_reward,
+        "selfplay/avg_num_legal_actions": avg_num_legal,
+        "selfplay/frac_states_no_legal_action": frac_no_legal,
+        "selfplay/frac_illegal_moves": frac_illegal_moves,
+    }
+
+    return state, rng_key, model, opt_state, metrics
 
 
 if __name__ == "__main__":
@@ -233,21 +247,14 @@ if __name__ == "__main__":
     ).astype(jnp.float32)
     model = forward.init(jax.random.PRNGKey(0), dummy_input)  # (params, state)
     opt_state = optimizer.init(params=model[0])
-    # replicates to all devices (drop-in for the deprecated jax.device_put_replicated)
-    # We just add a leading device axis; the @jax.pmap'd functions below handle placement.
-    def _replicate(x):
-        return jnp.broadcast_to(x[None], (num_devices,) + x.shape)
-
-    model, opt_state = jax.tree.map(_replicate, (model, opt_state))
 
     # persistent env state across iterations (never reset).
-    # Shape per leaf: (num_devices, batch_per_device, ...).
-    batch_per_device = config.selfplay_batch_size // num_devices
+    # Shape per leaf: (selfplay_batch_size, ...).
     init_state = env.init()
     state = jax.tree.map(
         lambda x: jnp.broadcast_to(
-            jnp.asarray(x)[None, None],
-            (num_devices, batch_per_device) + jnp.asarray(x).shape,
+            jnp.asarray(x)[None],
+            (config.selfplay_batch_size,) + jnp.asarray(x).shape,
         ),
         init_state,
     )
@@ -255,7 +262,7 @@ if __name__ == "__main__":
     # Prepare checkpoint dir
     now = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=9)))
     now = now.strftime("%Y%m%d%H%M%S")
-    ckpt_dir = os.path.join("checkpoints", f"continual_go_az_{now}")
+    ckpt_dir = os.path.join("checkpoints", f"continual_go_az_{now}_{config.board_size}_{config.max_stones}_{config.seed}")
     os.makedirs(ckpt_dir, exist_ok=True)
 
     # Initialize logging dict
@@ -266,29 +273,14 @@ if __name__ == "__main__":
 
     rng_key = jax.random.PRNGKey(config.seed)
     while True:
-        # if iteration % config.eval_interval == 0:
-        #     # Evaluation
-        #     rng_key, subkey = jax.random.split(rng_key)
-        #     keys = jax.random.split(subkey, num_devices)
-        #     R = evaluate(keys, model)
-        #     log.update(
-        #         {
-        #             f"eval/vs_baseline/avg_R": R.mean().item(),
-        #             f"eval/vs_baseline/win_rate": ((R == 1).sum() / R.size).item(),
-        #             f"eval/vs_baseline/draw_rate": ((R == 0).sum() / R.size).item(),
-        #             f"eval/vs_baseline/lose_rate": ((R == -1).sum() / R.size).item(),
-        #         }
-        #     )
-
         # Store checkpoints
         if iteration % config.save_interval == 0:
-            model_0, opt_state_0 = jax.tree_util.tree_map(lambda x: x[0], (model, opt_state))
             with open(os.path.join(ckpt_dir, f"{iteration:06d}.ckpt"), "wb") as f:
                 dic = {
                        "config": config,
                        "rng_key": rng_key,
-                       "model": jax.device_get(model_0),
-                       "opt_state": jax.device_get(opt_state_0),
+                       "model": jax.device_get(model),
+                       "opt_state": jax.device_get(opt_state),
                        "iteration": iteration,
                        "frames": frames,
                        "hours": hours,
@@ -305,43 +297,9 @@ if __name__ == "__main__":
         log = {"iteration": iteration}
         st = time.time()
 
-        # Selfplay (continuing — state is carried over from the previous iteration)
-        rng_key, subkey = jax.random.split(rng_key)
-        keys = jax.random.split(subkey, num_devices)
-        data, state = selfplay(model, state, keys)
-        avg_reward = float(jax.device_get(data.reward).mean())
-        samples: Sample = compute_loss_input(model, data, state)
-
-        # Shuffle samples and make minibatches
-        samples = jax.device_get(samples)  # (#devices, batch, max_num_steps, ...)
-        frames += samples.obs.shape[0] * samples.obs.shape[1] * samples.obs.shape[2]
-        samples = jax.tree_util.tree_map(lambda x: x.reshape((-1, *x.shape[3:])), samples)
-        rng_key, subkey = jax.random.split(rng_key)
-        ixs = jax.random.permutation(subkey, jnp.arange(samples.obs.shape[0]))
-        samples = jax.tree_util.tree_map(lambda x: x[ixs], samples)  # shuffle
-        num_updates = samples.obs.shape[0] // config.training_batch_size
-        minibatches = jax.tree_util.tree_map(
-            lambda x: x.reshape((num_updates, num_devices, -1) + x.shape[1:]), samples
-        )
-
-        # Training
-        policy_losses, value_losses = [], []
-        for i in range(num_updates):
-            minibatch: Sample = jax.tree_util.tree_map(lambda x: x[i], minibatches)
-            model, opt_state, policy_loss, value_loss = train(model, opt_state, minibatch)
-            policy_losses.append(policy_loss.mean().item())
-            value_losses.append(value_loss.mean().item())
-        policy_loss = sum(policy_losses) / len(policy_losses)
-        value_loss = sum(value_losses) / len(value_losses)
-
+        state, rng_key, model, opt_state, metrics = experiment_loop(rng_key, model, state, opt_state)
+        frames += config.selfplay_batch_size * config.max_num_steps
         et = time.time()
         hours += (et - st) / 3600
-        log.update(
-            {
-                "train/policy_loss": policy_loss,
-                "train/value_loss": value_loss,
-                "train/avg_reward_per_step": avg_reward,
-                "hours": hours,
-                "frames": frames,
-            }
-        )
+        log.update({k: float(v) for k, v in metrics.items()})
+        log.update({"hours": hours, "frames": frames})
