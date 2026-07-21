@@ -10,6 +10,8 @@ import mctx
 
 from .alpha_zero.config import Config
 from .alpha_zero.network import AZNet
+from .skill_sched import SkillScheduler
+from .skill_sched.linear import SkillScheduler
 
 import __main__
 
@@ -24,15 +26,15 @@ class State:
     board: Integer[Array, "size size"]  # signed age: sign=color, magnitude=age
     turn: IntLike  # -1 (black) or +1 (white)
 
-    skill_level: ScalarLike
+    skill_sched: SkillScheduler
     num_step: IntLike
 
     # PGX-style chain bookkeeping (recomputed at the end of every step)
     chain_id: Integer[Array, "size size"]  # signed chain id; sign=color, 0=empty
     ko: IntLike  # forbidden flat index, -1 if none
-    num_pseudo: Integer[Array, "num_actions"]  # per-chain pseudo-liberty stats
-    idx_sum: Integer[Array, "num_actions"]
-    idx_squared_sum: Integer[Array, "num_actions"]
+    num_pseudo: Integer[Array, " num_actions"]  # per-chain pseudo-liberty stats
+    idx_sum: Integer[Array, " num_actions"]
+    idx_squared_sum: Integer[Array, " num_actions"]
 
 
 # -------- low-level helpers --------
@@ -136,7 +138,7 @@ def _pseudo_stats(
 
 def _adj_ixs(xy: IntLike, n: int) -> jax.Array:
     """Flat indices of the 4 neighbors of `xy`; -1 if off-board."""
-    i = xy // n
+    i = xy // n  # ty: ignore
     j = xy - n * i
     return jnp.stack(
         [
@@ -187,10 +189,6 @@ def forward_fn(x, num_actions, cfg):
     return policy_out, value_out
 
 
-def level_update_linear(level: ScalarLike, t: IntLike, final_t: IntLike) -> ScalarLike:
-    return t / final_t
-
-
 forward = hk.without_apply_rng(hk.transform_with_state(forward_fn))
 
 
@@ -203,13 +201,21 @@ class ContinualGo(PyTreeNode):
     total_steps: int = struct.field(pytree_node=False)  # length of the experiment
     opponent_model: Any = struct.field(pytree_node=True)
     az_config: Any = struct.field(pytree_node=True)
+    init_sched: SkillScheduler = struct.field(pytree_node=True)
 
     @property
     def num_actions(self) -> IntLike:
         return self.size * self.size
 
     @classmethod
-    def create(cls, size: int, k: int, total_steps: int, opponent_path: str):
+    def create(
+        cls,
+        size: int,
+        k: int,
+        total_steps: int,
+        opponent_path: str,
+        skill_sched: SkillScheduler,
+    ):
         ckpt_data = load_checkpoint(opponent_path)
         return cls(
             size=size,
@@ -217,6 +223,7 @@ class ContinualGo(PyTreeNode):
             opponent_model=ckpt_data["model"],
             az_config=ckpt_data["config"],
             total_steps=total_steps,
+            init_sched=skill_sched,
         )
 
     @classmethod
@@ -239,7 +246,7 @@ class ContinualGo(PyTreeNode):
             num_pseudo=jnp.zeros(n * n, dtype=jnp.int32),
             idx_sum=jnp.zeros(n * n, dtype=jnp.int32),
             idx_squared_sum=jnp.zeros(n * n, dtype=jnp.int32),
-            skill_level=0,
+            skill_sched=self.init_sched,
             num_step=0,
         )
 
@@ -310,34 +317,30 @@ class ContinualGo(PyTreeNode):
             params=self.opponent_model,
             rng_key=key_mctx,
             root=root,
-            recurrent_fn=recurrent_fn,
+            recurrent_fn=recurrent_fn,  # ty: ignore[invalid-argument-type]
             num_simulations=self.az_config.num_simulations,
             invalid_actions=invalid_actions,
             qtransform=mctx.qtransform_completed_by_mix_value,
-            gumbel_scale=1.0,
-            max_depth=jnp.asarray(
-                self.az_config.num_simulations * state.skill_level, dtype=jnp.int32
-            ),
+            gumbel_scale=0.0,
         )
 
-        noise = jax.random.uniform(key_noise, (self.num_actions,)) * (~invalid_actions)
-        noise /= noise.sum()
-        weights = (
-            state.skill_level * policy_output.action_weights
-            + (1 - state.skill_level) * noise
-        )
-        action = jax.random.categorical(key_sample, weights)
+        # noise = jax.random.uniform(key_noise, (self.num_actions,)) * (~invalid_actions)  # ty: ignore[invalid-argument-type]
+        # noise /= noise.sum()
+        # weights = (
+        #     state.skill_level * policy_output.action_weights
+        #     + (1 - state.skill_level) * noise
+        # )
+        # action = jax.random.categorical(key_sample, weights)
+        action = policy_output.action
+        print("TODO: Implement the skill control based on the skill level value")
 
         # next_state, reward_az = self.step_turn(state, policy_output.action[0])
         next_state, reward_az = self.step_turn(state, action)
 
         next_step = next_state.num_step + 1
-        next_level = level_update_linear(
-            next_state.skill_level, next_step, self.total_steps
-        )
-        next_state = next_state.replace(
+        next_state = next_state.replace(  # ty: ignore
             num_step=next_step,
-            skill_level=next_level,
+            skill_sched=state.skill_sched.update(),
         )
 
         return next_state, player_reward - reward_az
@@ -364,7 +367,7 @@ class ContinualGo(PyTreeNode):
         nps, ids, iqs = _pseudo_stats(chain_id)
 
         # 3. Capture opponent chains with no pseudo-liberty (no liberty at all).
-        opponent = -state.turn
+        opponent = -state.turn  # ty: ignore
         chain_ix = jnp.where(chain_id == 0, 0, jnp.abs(chain_id) - 1)
         captured = (signed == opponent) & (nps[chain_ix] == 0)
         new_board = jnp.where(captured, jnp.int32(0), new_board)
@@ -374,7 +377,7 @@ class ContinualGo(PyTreeNode):
         def remove_oldest(b):
             flat = b.reshape(-1)
             return jax.lax.cond(
-                opponent > 0,
+                opponent > 0,  # ty: ignore
                 lambda: flat.at[jnp.argmax(flat)].set(0),
                 lambda: flat.at[jnp.argmin(flat)].set(0),
             ).reshape((n, n))
@@ -414,7 +417,7 @@ class ContinualGo(PyTreeNode):
         new_ko = jnp.squeeze(new_ko)
 
         return (
-            state.replace(
+            state.replace(  # ty: ignore
                 board=new_board,
                 turn=opponent,
                 chain_id=chain_id,
@@ -490,7 +493,7 @@ class ContinualGo(PyTreeNode):
         cell_in_atari = jnp.where(is_empty, False, in_atari_per_chain[chain_ix])
 
         has_lib = (state.chain_id * my_sign > 0) & ~cell_in_atari  # mine, >=2 libs
-        can_kill = (state.chain_id * (-my_sign) > 0) & cell_in_atari  # opp in atari
+        can_kill = (state.chain_id * (-my_sign) > 0) & cell_in_atari  # ty: ignore (opp in atari)
 
         e_flat = is_empty.reshape(-1)
         k_flat = can_kill.reshape(-1)

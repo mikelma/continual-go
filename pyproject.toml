@@ -21,3 +21,6 @@ members = [
     ".",
     "plots",
 ]
+
+[tool.ruff.lint]
+ignore = ["F722"]
