@@ -6,6 +6,8 @@ from . import SkillControl
 
 
 class EpsilonSkillControl(SkillControl):
+    """Returns samples a legal action uniformly with probability 1-skill_level, otherwise returning the original action."""
+
     def get_action(
         self,
         key: PRNGKeyArray,
