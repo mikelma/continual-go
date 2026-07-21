@@ -11,7 +11,8 @@ import mctx
 from .alpha_zero.config import Config
 from .alpha_zero.network import AZNet
 from .skill_sched import SkillScheduler
-from .skill_sched.linear import SkillScheduler
+from .skill_control import SkillControl
+from .skill_control.epsilon import EpsilonSkillControl
 
 import __main__
 
@@ -202,6 +203,7 @@ class ContinualGo(PyTreeNode):
     opponent_model: Any = struct.field(pytree_node=True)
     az_config: Any = struct.field(pytree_node=True)
     init_sched: SkillScheduler = struct.field(pytree_node=True)
+    skill_control: SkillControl = struct.field(pytree_node=True)
 
     @property
     def num_actions(self) -> IntLike:
@@ -215,6 +217,7 @@ class ContinualGo(PyTreeNode):
         total_steps: int,
         opponent_path: str,
         skill_sched: SkillScheduler,
+        skill_control: SkillControl = EpsilonSkillControl(),
     ):
         ckpt_data = load_checkpoint(opponent_path)
         return cls(
@@ -224,6 +227,7 @@ class ContinualGo(PyTreeNode):
             az_config=ckpt_data["config"],
             total_steps=total_steps,
             init_sched=skill_sched,
+            skill_control=skill_control,
         )
 
     @classmethod
@@ -312,7 +316,7 @@ class ContinualGo(PyTreeNode):
             prior_logits=logits, value=value, embedding=batched_state
         )
 
-        key_mctx, key_sample, key_noise = jax.random.split(key, 3)
+        key_mctx, key_sample, key_ctrl = jax.random.split(key, 3)
         policy_output = mctx.gumbel_muzero_policy(
             params=self.opponent_model,
             rng_key=key_mctx,
@@ -324,17 +328,15 @@ class ContinualGo(PyTreeNode):
             gumbel_scale=0.0,
         )
 
-        # noise = jax.random.uniform(key_noise, (self.num_actions,)) * (~invalid_actions)  # ty: ignore[invalid-argument-type]
-        # noise /= noise.sum()
-        # weights = (
-        #     state.skill_level * policy_output.action_weights
-        #     + (1 - state.skill_level) * noise
-        # )
-        # action = jax.random.categorical(key_sample, weights)
-        action = policy_output.action
-        print("TODO: Implement the skill control based on the skill level value")
+        legal_actions = self.legal_actions(state).reshape(-1)
+        action = self.skill_control.get_action(
+            key=key_ctrl,
+            policy_output=policy_output,
+            legal_actions=legal_actions,
+            skill_level=state.skill_sched.get(),
+        )
+        jax.debug.print("{a} {b}", a=policy_output.action, b=action)
 
-        # next_state, reward_az = self.step_turn(state, policy_output.action[0])
         next_state, reward_az = self.step_turn(state, action)
 
         next_step = next_state.num_step + 1
@@ -343,7 +345,7 @@ class ContinualGo(PyTreeNode):
             skill_sched=state.skill_sched.update(),
         )
 
-        return next_state, player_reward - reward_az
+        return next_state, player_reward - reward_az  # ty: ignore[unsupported-operator]
 
     def step_turn(self, state: State, action: IntLike) -> tuple[State, ScalarLike]:
         """Single turn step (useful for self-play)."""
