@@ -328,21 +328,21 @@ class ContinualGo(PyTreeNode):
             gumbel_scale=0.0,
         )
 
+        skill_level, new_skill_sched = state.skill_sched.get()
         legal_actions = self.legal_actions(state).reshape(-1)
         action = self.skill_control.get_action(
             key=key_ctrl,
             policy_output=policy_output,
             legal_actions=legal_actions,
-            skill_level=state.skill_sched.get(),
+            skill_level=skill_level,
         )
-        jax.debug.print("{a} {b}", a=policy_output.action, b=action)
 
         next_state, reward_az = self.step_turn(state, action)
 
         next_step = next_state.num_step + 1
         next_state = next_state.replace(  # ty: ignore
             num_step=next_step,
-            skill_sched=state.skill_sched.update(),
+            skill_sched=new_skill_sched,
         )
 
         return next_state, player_reward - reward_az  # ty: ignore[unsupported-operator]

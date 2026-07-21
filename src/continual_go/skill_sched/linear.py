@@ -4,12 +4,7 @@ from . import SkillScheduler
 
 
 class LinearSkillScheduler(SkillScheduler):
-    """Always returns the skill value given at initialization."""
-
     value: ScalarLike
 
-    def update(self) -> Self:
-        return self
-
-    def get(self) -> ScalarLike:
-        return self.value
+    def get(self) -> tuple[ScalarLike, Self]:
+        return self.value, self

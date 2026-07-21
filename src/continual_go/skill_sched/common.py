@@ -8,9 +8,5 @@ class SkillScheduler(ABC, PyTreeNode):
     """Common interface for skill schedulers."""
 
     @abstractmethod
-    def update(self) -> Self:
-        """Runs a single update step in the scheduler."""
-
-    @abstractmethod
-    def get(self) -> ScalarLike:
-        """Returns the new skill value."""
+    def get(self) -> tuple[ScalarLike, Self]:
+        """Returns the new skill value together with the new state of the scheduler."""
