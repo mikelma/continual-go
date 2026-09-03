@@ -238,6 +238,8 @@ class ContinualGo(PyTreeNode):
             opponent_model=None,
             az_config=None,
             total_steps=-1,  # this is ignored for self-play
+            init_sched=None,
+            skill_control=None,
         )
 
     def init(self) -> State:
