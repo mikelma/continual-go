@@ -58,6 +58,7 @@ class Args(BaseModel):
     gamma: float = 0.99
 
     num_simulations: int = 32
+    num_simulations_b: int = 32
     max_num_steps: int = 256
 
     sampling_method: SamplingMethod = "dirichlet-argmax"
@@ -202,7 +203,7 @@ def epsilon_ranking_sampling(
     )
 
 
-@partial(jax.jit, static_argnames="sampling_method")
+@partial(jax.jit, static_argnames=("sampling_method", "num_simulations_b"))
 def play(
     model_a,
     model_b,
@@ -213,6 +214,7 @@ def play(
     sampling_method: SamplingMethod = "dirichlet-argmax",
     var_mul: float = 3.0,
     eps_q_margin: float = jnp.inf,
+    num_simulations_b: int = 32,
 ):
     state = jax.tree.map(lambda x: x[None], state)
 
@@ -264,7 +266,7 @@ def play(
             rng_key=mctx_key,
             root=root_b,
             recurrent_fn=recurrent_fn,  # ty: ignore[invalid-argument-type]
-            num_simulations=config.num_simulations,
+            num_simulations=num_simulations_b,
             invalid_actions=(~legal_b).reshape(logits_b.shape),
             qtransform=mctx.qtransform_completed_by_mix_value,
             # max_depth=(config.num_simulations * skill_level).astype(jnp.int32),  # ty: ignore
@@ -404,6 +406,7 @@ if __name__ == "__main__":
         sampling_method=args.sampling_method,
         var_mul=args.rank_var_mul,
         eps_q_margin=eps_margin,
+        num_simulations_b=config.num_simulations_b,
     )
 
     label_a = args.load_path_a.split("/")[-1]
