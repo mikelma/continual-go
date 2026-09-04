@@ -29,6 +29,7 @@ SamplingMethod: TypeAlias = Literal[
     "clip-epsilon",
     "temperature",
     "epsilon-ranking-prior",
+    "default",
 ]
 
 
@@ -57,11 +58,13 @@ class Args(BaseModel):
 
     gamma: float = 0.99
 
-    num_simulations: int = 32
+    num_simulations_a: int = 32
     num_simulations_b: int = 32
+    gumbel_a: float = 0
+    gumbel_b: float = 0
     max_num_steps: int = 256
 
-    sampling_method: SamplingMethod = "dirichlet-argmax"
+    sampling_method: SamplingMethod = "default"
 
     record_gif: bool = False
     show_plot: bool = False
@@ -235,10 +238,10 @@ def play(
             rng_key=mctx_key,
             root=root_a,
             recurrent_fn=recurrent_fn,  # ty: ignore[invalid-argument-type]
-            num_simulations=config.num_simulations,
+            num_simulations=config.num_simulations_a,
             invalid_actions=(~legal_a).reshape(logits_a.shape),
             qtransform=mctx.qtransform_completed_by_mix_value,
-            gumbel_scale=0,
+            gumbel_scale=config.gumbel_a,
         )
 
         key, sample_key = jax.random.split(key)
@@ -270,7 +273,7 @@ def play(
             invalid_actions=(~legal_b).reshape(logits_b.shape),
             qtransform=mctx.qtransform_completed_by_mix_value,
             # max_depth=(config.num_simulations * skill_level).astype(jnp.int32),  # ty: ignore
-            gumbel_scale=0,
+            gumbel_scale=config.gumbel_b,
         )
 
         # qvalues = policy_b.search_tree.summary().qvalues
@@ -286,7 +289,10 @@ def play(
         policy_b_qvalues = policy_b.search_tree.summary().qvalues
 
         # Decide which action to take based on the policy B output and the sampling method
-        if (
+        if sampling_method == "default":
+            policy_b_action = policy_b.action
+
+        elif (
             sampling_method == "dirichlet-argmax"
             or sampling_method == "dirichlet-sample"
         ):
@@ -420,7 +426,7 @@ if __name__ == "__main__":
 
         with open(fname, "w") as f:
             f.write(
-                "seed,sampling_method,board_size,k,num_steps,skill_level,dirichlet_alpha,model_A,model_B,sims_A,sims_B,return_A,return_B\n"
+                "seed,sampling_method,board_size,k,num_steps,skill_level,dirichlet_alpha,model_A,model_B,sims_A,sims_B,gumbel_A,gumbel_B,return_A,return_B\n"
             )
             if args.sampling_method == "epsilon-ranking":
                 args.sampling_method += f"-{args.rank_var_mul}"
@@ -431,7 +437,7 @@ if __name__ == "__main__":
                 args.sampling_method += f"-{args.eps_margin[0]}-{args.eps_margin[1]}"
 
             f.write(
-                f"{args.seed},{args.sampling_method},{args.board_size},{args.max_stones},{args.max_num_steps},{args.skill_level},{args.dirichlet_alpha},{args.load_path_a},{args.load_path_b},{config.num_simulations},{args.num_simulations_b},{ret_A},{ret_B}\n"
+                f"{args.seed},{args.sampling_method},{args.board_size},{args.max_stones},{args.max_num_steps},{args.skill_level},{args.dirichlet_alpha},{args.load_path_a},{args.load_path_b},{config.num_simulations_a},{args.num_simulations_b},{config.gumbel_a},{config.gumbel_b},{ret_A},{ret_B}\n"
             )
 
     if args.show_plot:
