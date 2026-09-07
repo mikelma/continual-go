@@ -28,6 +28,7 @@ SamplingMethod: TypeAlias = Literal[
     "epsilon-ranking",
     "clip-epsilon",
     "temperature",
+    "dyn-temp",
     "epsilon-ranking-prior",
     "default",
 ]
@@ -48,6 +49,7 @@ class Args(BaseModel):
     dirichlet_alpha: float = 1.0
     rank_var_mul: float = 3.0
     eps_margin: float | tuple[float, float] = jnp.inf
+    dyn_min_val: float = -jnp.inf
 
     board_size: int = 9
     max_stones: int = 32
@@ -360,6 +362,31 @@ def play(
                 legal_mask=legal_b.reshape(-1),
             )
 
+        elif sampling_method == "dyn-temp":
+            valid_qvalues = jnp.where(legal_b.reshape(-1), policy_b_qvalues, jnp.nan)
+            max_q = jnp.nanmax(valid_qvalues)
+            min_q = jnp.nanmin(valid_qvalues)
+
+            value_cutoff = (config.dyn_min_val * (max_q - min_q)) + min_q
+            cutoff_mask = (valid_qvalues >= value_cutoff) & (~jnp.isnan(value_cutoff))
+
+            mask = legal_b.reshape(-1) & cutoff_mask
+
+            # jax.debug.print(
+            #     "num moves: {n}, min Q: {min}, max Q: {max}, cutoff: {cut}",
+            #     n=mask.sum(),
+            #     min=min_q,
+            #     max=max_q,
+            #     cut=value_cutoff,
+            # )
+
+            # 4. Sample using the existing temperature logic, but with the strict mask
+            policy_b_action = temperature_sampling(
+                key=key_sample,
+                prior=policy_b.action_weights,  # ty: ignore[invalid-argument-type]
+                skill_level=skill_level,
+                legal_mask=mask,
+            )
         else:
             raise Exception(f"Invalid sampling method '{sampling_method}'")
 
@@ -426,7 +453,7 @@ if __name__ == "__main__":
 
         with open(fname, "w") as f:
             f.write(
-                "seed,sampling_method,board_size,k,num_steps,skill_level,dirichlet_alpha,model_A,model_B,sims_A,sims_B,gumbel_A,gumbel_B,return_A,return_B\n"
+                "seed,sampling_method,board_size,k,num_steps,skill_level,dirichlet_alpha,dyn temp min,model_A,model_B,sims_A,sims_B,gumbel_A,gumbel_B,return_A,return_B\n"
             )
             if args.sampling_method == "epsilon-ranking":
                 args.sampling_method += f"-{args.rank_var_mul}"
@@ -437,7 +464,7 @@ if __name__ == "__main__":
                 args.sampling_method += f"-{args.eps_margin[0]}-{args.eps_margin[1]}"
 
             f.write(
-                f"{args.seed},{args.sampling_method},{args.board_size},{args.max_stones},{args.max_num_steps},{args.skill_level},{args.dirichlet_alpha},{args.load_path_a},{args.load_path_b},{config.num_simulations_a},{args.num_simulations_b},{config.gumbel_a},{config.gumbel_b},{ret_A},{ret_B}\n"
+                f"{args.seed},{args.sampling_method},{args.board_size},{args.max_stones},{args.max_num_steps},{args.skill_level},{args.dirichlet_alpha},{config.dyn_min_val},{args.load_path_a},{args.load_path_b},{config.num_simulations_a},{args.num_simulations_b},{config.gumbel_a},{config.gumbel_b},{ret_A},{ret_B}\n"
             )
 
     if args.show_plot:
