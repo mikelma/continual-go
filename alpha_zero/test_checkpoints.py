@@ -370,7 +370,9 @@ def play(
             value_cutoff = (config.dyn_min_val * (max_q - min_q)) + min_q
             cutoff_mask = (valid_qvalues >= value_cutoff) & (~jnp.isnan(value_cutoff))
 
-            mask = legal_b.reshape(-1) & cutoff_mask
+            # just in case, make sure that at least one legal option can be chosen
+            best_action_mask = valid_qvalues == max_q
+            mask = (legal_b.reshape(-1) & cutoff_mask) | best_action_mask
 
             # jax.debug.print(
             #     "num moves: {n}, min Q: {min}, max Q: {max}, cutoff: {cut}",
@@ -379,8 +381,6 @@ def play(
             #     max=max_q,
             #     cut=value_cutoff,
             # )
-
-            # 4. Sample using the existing temperature logic, but with the strict mask
             policy_b_action = temperature_sampling(
                 key=key_sample,
                 prior=policy_b.action_weights,  # ty: ignore[invalid-argument-type]
