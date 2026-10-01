@@ -7,6 +7,8 @@ from typing import TypeAlias, Any
 import haiku as hk
 import pickle
 import mctx
+import subprocess
+import os
 
 from .alpha_zero.config import Config
 from .alpha_zero.network import AZNet
@@ -151,7 +153,33 @@ def _adj_ixs(xy: IntLike, n: int) -> jax.Array:
     )
 
 
-def load_checkpoint(ckpt_path):
+def load_checkpoint(ckpt_path, cache_dir="/tmp"):
+    if ckpt_path.startswith("https"):
+        model_name = ckpt_path.split("/")[-1]
+        model_path = os.path.join(cache_dir, model_name)
+
+        # make sure that the cache directory exists
+        # (create if needed)
+        os.makedirs(cache_dir, exist_ok=True)
+
+        # download the model from the URL if not already downloaded in the cache_dir
+        if not os.path.exists(model_path):
+            print(
+                "\033[38;2;0;0;0;48;2;98;160;234m>> URL detected, downloading opponent model...\033[0m"
+            )
+            result = subprocess.run(["wget", ckpt_path, "-P", cache_dir])
+            if result.returncode != 0:
+                raise Exception(
+                    f"Failed to run wget with the following URL: {ckpt_path}"
+                )
+            else:
+                print("\033[38;2;0;0;0;48;2;98;160;234m>> Download successful!\033[0m")
+        else:
+            print(
+                f"\033[38;2;0;0;0;48;2;98;160;234m>> Using chached opponent model at '{model_path}'\033[0m"
+            )
+        ckpt_path = model_path
+
     with open(ckpt_path, "rb") as f:
         checkpoint = pickle.load(f)
 
