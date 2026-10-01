@@ -14,7 +14,7 @@ from .alpha_zero.config import Config
 from .alpha_zero.network import AZNet
 from .skill_sched import SkillScheduler
 from .skill_control import SkillControl
-from .skill_control.epsilon import EpsilonSkillControl
+from .skill_control.temperature import TemperatureSkillControl
 
 import __main__
 
@@ -245,7 +245,7 @@ class ContinualGo(PyTreeNode):
         total_steps: int,
         opponent_path: str,
         skill_sched: SkillScheduler,
-        skill_control: SkillControl = EpsilonSkillControl(),
+        skill_control: SkillControl = TemperatureSkillControl(),
     ):
         ckpt_data = load_checkpoint(opponent_path)
         return cls(
