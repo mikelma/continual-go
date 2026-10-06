@@ -227,7 +227,6 @@ forward = hk.without_apply_rng(hk.transform_with_state(forward_fn))
 class ContinualGo(PyTreeNode):
     size: int = struct.field(pytree_node=False)
     k: int = struct.field(pytree_node=False)  # max number of stones per player
-    total_steps: int = struct.field(pytree_node=False)  # length of the experiment
     opponent_model: Any = struct.field(pytree_node=True)
     az_config: Any = struct.field(pytree_node=True)
     init_sched: SkillScheduler = struct.field(pytree_node=True)
@@ -242,18 +241,17 @@ class ContinualGo(PyTreeNode):
         cls,
         size: int,
         k: int,
-        total_steps: int,
         opponent_path: str,
         skill_sched: SkillScheduler,
         skill_control: SkillControl = TemperatureSkillControl(),
+        opponent_cache_dir: str = "/tmp",
     ):
-        ckpt_data = load_checkpoint(opponent_path)
+        ckpt_data = load_checkpoint(opponent_path, cache_dir=opponent_cache_dir)
         return cls(
             size=size,
             k=k,
             opponent_model=ckpt_data["model"],
             az_config=ckpt_data["config"],
-            total_steps=total_steps,
             init_sched=skill_sched,
             skill_control=skill_control,
         )
@@ -265,7 +263,6 @@ class ContinualGo(PyTreeNode):
             k=k,
             opponent_model=None,
             az_config=None,
-            total_steps=-1,  # this is ignored for self-play
             init_sched=None,
             skill_control=None,
         )
