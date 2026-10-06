@@ -1,12 +1,14 @@
 from jaxtyping import ScalarLike
+import jax.numpy as jnp
 from typing import Self
 from . import SkillScheduler
 
 
 class LinearSkillScheduler(SkillScheduler):
     value: ScalarLike
-    decay: ScalarLike = 1.0
+    delta: ScalarLike = 0
     step: ScalarLike = 0
 
     def get(self) -> tuple[ScalarLike, Self]:
-        return self.value * (self.decay**self.step), self.replace(step=self.step + 1)
+        value = jnp.clip(self.value + (self.step * self.delta), 0, 1)
+        return value, self.replace(step=self.step + 1)
