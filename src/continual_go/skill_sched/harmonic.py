@@ -6,9 +6,6 @@ from flax import struct
 from . import SkillScheduler
 
 
-# TODO Option to have different amplitudes per wave
-
-
 @struct.dataclass
 class HarmonicSkillScheduler(SkillScheduler):
     key: PRNGKeyArray

@@ -1,10 +1,15 @@
 from __future__ import annotations
+import sys
+import os
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import jax
 import jax.numpy as jnp
 
 from src.continual_go.skill_sched.linear import LinearSkillScheduler
 from src.continual_go.skill_sched.harmonic import HarmonicSkillScheduler
+from src.continual_go.skill_sched.interp import InterpolatedSkillScheduler
 import tyro
 import matplotlib.pyplot as plt
 
@@ -25,8 +30,21 @@ class Harmonic:
 
 
 @dataclasses.dataclass
+class Interp:
+    xs: tuple[float, ...] = (
+        0,
+        int(2e5),
+        int(5e5),
+        int(7e5),
+        int(8e5),
+        int(1e6),
+    )
+    ys: tuple[float, ...] = (0, 0.1, 0.3, 0.8, 0.2, 1)
+
+
+@dataclasses.dataclass
 class Args:
-    method: Linear | Harmonic
+    method: Linear | Harmonic | Interp
     steps: int = 1_000_000
     seed: int = 42
 
@@ -35,7 +53,11 @@ if __name__ == "__main__":
     args = tyro.cli(Args)
     key = jax.random.key(args.seed)
 
-    clss = [(Linear, LinearSkillScheduler), (Harmonic, HarmonicSkillScheduler)]
+    clss = [
+        (Linear, LinearSkillScheduler),
+        (Harmonic, HarmonicSkillScheduler),
+        (Interp, InterpolatedSkillScheduler),
+    ]
     scheduler = None
     for cls_arg, cls_sched in clss:
         if isinstance(args.method, cls_arg):
