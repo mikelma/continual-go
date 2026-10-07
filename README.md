@@ -10,10 +10,8 @@ ContinualGO is an environment designed to challenge reinforcement learning algor
 Using [`uv`](https://docs.astral.sh/uv/) you can install the latest version (main branch) of ContinualGo by running the following command inside an `uv` project:
 
 ```bash
-uv add git+https://github.com/mikelma/small-world.git
+uv add git+https://github.com/mikelma/continual-go.git
 ```
-
-**⚠️ TODO: Update to new API ⚠️**
 
 Now you can start using ContinualGo in your project! For example,
 
@@ -21,7 +19,7 @@ Now you can start using ContinualGo in your project! For example,
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
-from continual_go import ContinualGo, plot_board
+from src.continual_go import plot_board, get_benchmark
 
 
 def act_randomly(key, mask):
@@ -31,24 +29,33 @@ def act_randomly(key, mask):
     logits = jnp.maximum(jnp.log(probs), jnp.finfo(probs.dtype).min)
     return jax.random.categorical(key, logits=logits, axis=-1)
 
-env = ContinualGo(size=9, k=32)  # k: max number of stones per player
-
-state = env.init()  # get the initial state (deterministic)
 
 key = jax.random.key(42)
+
+key, _key = jax.random.split(key)
+
+env = get_benchmark("9x9-k16-1", _key)
+
+state = env.init()  # get the initial state (deterministic)
 
 while True:  # wow! this is truly continual!
     plt.cla()
     plot_board(state.board, ax=plt.gca(), show=False)
     plt.pause(0.1)
 
-    key, _key = jax.random.split(key)
-    action = act_randomly(_key, env.legal_actions(state))
-    state, reward = env.step(state, action)
+    key, key_act, key_step = jax.random.split(key, num=3)
+
+    action = act_randomly(key_act, env.legal_actions(state))
+
+    state, reward = env.step(key_step, state, action)
+
     print(reward)
 ```
 
-## API
+## API (DEPRECATED 🕸️)
+
+**⚠️ TODO: Update to new API ⚠️**
+
 
 ContinualGo has a minimalist API inspired by Gymnasium-like environments.
 

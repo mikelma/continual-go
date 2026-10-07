@@ -94,6 +94,8 @@ def many(
 ):
     df = pd.read_csv(data)
 
+    # df = df[(df["skill_level"] <= 1) & (df["dyn temp min"] <= 0.0)]
+
     if len(select) > 0:
         df = df[df["sampling_method"].isin(select)]
 
@@ -105,6 +107,7 @@ def many(
     methods = df["sampling_method"].unique()
     for method in methods:
         sel = df[df["sampling_method"] == method]
+
         r, p = sp.stats.pearsonr(sel["skill_level"], sel["return_A"])
         corrs.append(r)
         print(method)
@@ -117,10 +120,23 @@ def many(
     # plt.title("Ranking-based skill control")
 
     if plot == "box":
-        sns.boxplot(data=df, x="skill_level", y="return_A", hue="sampling_method")
+        sns.boxplot(
+            data=df,
+            x="skill_level",
+            y="return_A",
+            hue="dyn temp min",
+            # hue="sampling_method",
+            palette=sns.color_palette("tab10"),
+        )
+        # sns.boxplot(data=df, x="skill_level", y="return_A", hue="sampling_method")
     elif plot == "line":
         sns.lineplot(
-            data=df, x="skill_level", y="return_A", errorbar="sd", hue="sampling_method"
+            data=df,
+            x="skill_level",
+            y="return_A",
+            errorbar="sd",
+            # hue="sampling_method",
+            hue="k",
         )
 
     ax = plt.gca()
@@ -129,10 +145,43 @@ def many(
     ax.set_xlabel("Skill level")
     ax.tick_params(axis="x", labelrotation=45)
     ax.set_ylabel("Opponent's return")
-    rstr = "Pearson's r:\n" + "\n".join(
-        [f"{m}: " + "{:.2f}".format(r) for m, r in zip(methods, corrs)]
-    )
-    plt.text(0.8, 0.8, rstr, transform=ax.transAxes)
+    # rstr = "Pearson's r:\n" + "\n".join(
+    #     [f"{m}: " + "{:.2f}".format(r) for m, r in zip(methods, corrs)]
+    # )
+    # plt.text(0.8, 0.8, rstr, transform=ax.transAxes)
+    # plt.axhline(y=0, color="tab:gray", linestyle="dashed")
+
+    plt.show()
+
+
+@app.command
+def checkpoints(
+    data: str = "./bender.csv",
+    font_size: int = 17,
+    plot: Literal["line", "box"] = "box",
+):
+    df = pd.read_csv(data)
+
+    plt.rcParams.update({"font.size": font_size})
+
+    df["return_A"] = df["return_A"] - df["return_B"]
+
+    df["model_B"] = df["model_B"].apply(lambda s: int(s.split("/")[-1].split(".")[0]))
+    df = df.sort_values(by=["model_B"])
+
+    print(df.groupby("model_B")["seed"].nunique())
+
+    if plot == "box":
+        sns.boxplot(data=df, x="model_B", y="return_A", hue="k")
+    elif plot == "line":
+        sns.lineplot(data=df, x="model_B", y="return_A", errorbar="sd", hue="k")
+
+    ax = plt.gca()
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.set_xlabel("Checkpoint (model B)")
+    ax.tick_params(axis="x", labelrotation=45)
+    ax.set_ylabel("Opponent's return (model A)")
 
     plt.show()
 
