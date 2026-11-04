@@ -23,14 +23,14 @@ BENCHMARKS = {
 }
 
 
-def get_benchmark(name: str, key: PRNGKeyArray, **kwargs):
+def get_benchmark(name: str, **kwargs):
     cfg = BENCHMARKS[name]
 
     bench_args = dict(
         size=cfg["size"],
         k=cfg["k"],
         opponent_path=cfg["opponent_path"],
-        skill_sched=cfg["skill_sched_class"](key, **cfg["skill_sched_kwargs"]),
+        skill_sched=cfg["skill_sched_class"](**cfg["skill_sched_kwargs"]),
         skill_control=cfg["skill_control_class"](),
     )
 

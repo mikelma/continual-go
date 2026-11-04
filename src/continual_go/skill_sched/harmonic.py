@@ -8,15 +8,12 @@ from . import SkillScheduler
 
 @struct.dataclass
 class HarmonicSkillScheduler(SkillScheduler):
-    key: PRNGKeyArray
     periods: jax.Array
     amps: jax.Array
     mul_amp: float = 1
     step: int = 0
 
     def get(self) -> tuple[ScalarLike, Self]:
-        new_key, _key = jax.random.split(self.key)
-
         omegas = (2 * jnp.pi) / self.periods
 
         waves = -jnp.cos(omegas * self.step)
@@ -27,6 +24,6 @@ class HarmonicSkillScheduler(SkillScheduler):
 
         amp = jnp.clip(self.step * self.mul_amp, 0, 1)
 
-        value = amp * (value + 1) / 2
+        value = jnp.clip(amp * (value + 1) / 2, 0, 1)
 
-        return value, self.replace(key=new_key, step=self.step + 1)
+        return value, self.replace(step=self.step + 1)

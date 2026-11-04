@@ -32,9 +32,7 @@ def act_randomly(key, mask):
 
 key = jax.random.key(42)
 
-key, _key = jax.random.split(key)
-
-env = get_benchmark("9x9-k16-1", _key)
+env = get_benchmark("9x9-k16-1")
 
 state = env.init()  # get the initial state (deterministic)
 
