@@ -3,12 +3,13 @@ import jax.numpy as jnp
 from flax import struct
 from flax.struct import PyTreeNode
 from jaxtyping import Scalar, ScalarLike, Array, Integer, Float, PRNGKeyArray, Bool
-from typing import TypeAlias, Any
+from typing import TypeAlias, Any, Optional
 import haiku as hk
 import pickle
 import mctx
 import subprocess
 import os
+import hashlib
 
 from .alpha_zero.config import Config
 from .alpha_zero.network import AZNet
@@ -153,7 +154,9 @@ def _adj_ixs(xy: IntLike, n: int) -> jax.Array:
     )
 
 
-def load_checkpoint(ckpt_path, cache_dir="/tmp"):
+def load_checkpoint(
+    ckpt_path: str, cache_dir: str = "/tmp", model_sha: Optional[str] = None
+):
     if ckpt_path.startswith("https"):
         model_name = ckpt_path.split("/")[-1]
         model_path = os.path.join(cache_dir, model_name)
@@ -179,6 +182,17 @@ def load_checkpoint(ckpt_path, cache_dir="/tmp"):
                 f"\033[38;2;0;0;0;48;2;98;160;234m>> Using chached opponent model at '{model_path}'\033[0m"
             )
         ckpt_path = model_path
+
+    if model_sha is not None:
+        with open(ckpt_path, "rb") as f:
+            m = hashlib.sha256()
+            m.update(f.read())
+            readed_sha = m.hexdigest()
+
+            if readed_sha != model_sha:
+                raise Exception(
+                    f"Loaded opponent model's SHA256 ({readed_sha}) does not match with the target {model_sha}"
+                )
 
     with open(ckpt_path, "rb") as f:
         checkpoint = pickle.load(f)
@@ -245,8 +259,11 @@ class ContinualGo(PyTreeNode):
         skill_sched: SkillScheduler,
         skill_control: SkillControl = TemperatureSkillControl(),
         opponent_cache_dir: str = "/tmp",
+        model_sha: Optional[str] = None,
     ):
-        ckpt_data = load_checkpoint(opponent_path, cache_dir=opponent_cache_dir)
+        ckpt_data = load_checkpoint(
+            opponent_path, cache_dir=opponent_cache_dir, model_sha=model_sha
+        )
         return cls(
             size=size,
             k=k,

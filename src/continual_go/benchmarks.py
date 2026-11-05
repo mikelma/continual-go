@@ -12,6 +12,7 @@ BENCHMARKS = {
         size=9,
         k=16,
         opponent_path="https://zenodo.org/records/23078271/files/az_9x9_k16_1.ckpt",
+        model_sha="9c5a0bd78505f9f2b7e7de23807e77ca4ffa269170efe57bb1ea846c9522b855",
         skill_sched_class=HarmonicSkillScheduler,
         skill_sched_kwargs=dict(
             periods=jnp.array([126229, 160243, 652033, 356959, 998909]),
@@ -30,6 +31,7 @@ def get_benchmark(name: str, **kwargs):
         size=cfg["size"],
         k=cfg["k"],
         opponent_path=cfg["opponent_path"],
+        model_sha=cfg["model_sha"],
         skill_sched=cfg["skill_sched_class"](**cfg["skill_sched_kwargs"]),
         skill_control=cfg["skill_control_class"](),
     )
