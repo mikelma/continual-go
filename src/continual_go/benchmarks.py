@@ -22,6 +22,19 @@ BENCHMARKS = {
         ),
         skill_control_class=TemperatureSkillControl,
     ),
+    # similar to 9x9-k16-A1M but scaled to 1M timesteps
+    "9x9-k16-A1M": dict(
+        size=9,
+        k=16,
+        opponent_path="https://zenodo.org/records/23078271/files/az_9x9_k16_1.ckpt",
+        model_sha="9c5a0bd78505f9f2b7e7de23807e77ca4ffa269170efe57bb1ea846c9522b855",
+        skill_sched_class=InterpolatedSkillScheduler,
+        skill_sched_kwargs=dict(
+            xs=jnp.array([0, 5e5, 5.1e5, 7.5e5, 7.6e5, 1e6]),
+            ys=jnp.array([0, 0, 1, 1, 0, 0]),
+        ),
+        skill_control_class=TemperatureSkillControl,
+    ),
     # y=1 until x=2.5e5, then y=0 for the rest of the steps
     "9x9-k16-B": dict(
         size=9,
@@ -31,6 +44,19 @@ BENCHMARKS = {
         skill_sched_class=InterpolatedSkillScheduler,
         skill_sched_kwargs=dict(
             xs=jnp.array([0, 2.5e5, 2.51e5, 5e5]),
+            ys=jnp.array([1, 1, 0, 0]),
+        ),
+        skill_control_class=TemperatureSkillControl,
+    ),
+    # similar to 9x9-k16-B but scaled to 1M timesteps
+    "9x9-k16-B1M": dict(
+        size=9,
+        k=16,
+        opponent_path="https://zenodo.org/records/23078271/files/az_9x9_k16_1.ckpt",
+        model_sha="9c5a0bd78505f9f2b7e7de23807e77ca4ffa269170efe57bb1ea846c9522b855",
+        skill_sched_class=InterpolatedSkillScheduler,
+        skill_sched_kwargs=dict(
+            xs=jnp.array([0, 5e5, 5.1e5, 1e6]),
             ys=jnp.array([1, 1, 0, 0]),
         ),
         skill_control_class=TemperatureSkillControl,
